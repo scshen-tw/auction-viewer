@@ -1,0 +1,36 @@
+name: Daily Auction Update
+
+on:
+  schedule:
+    - cron: '30 1 * * 1-5'   # 台灣時間週一~週五 09:30（UTC 01:30）
+  workflow_dispatch:           # 允許手動在網頁上觸發
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run incremental update
+        run: python auction_fetcher.py --update
+
+      - name: Regenerate HTML viewer
+        run: python auction_fetcher.py --html
+
+      - name: Commit and push updated files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add auction_stocks.json auction_cbs.json auction_viewer.html
+          git diff --staged --quiet && echo "No changes." || \
+            git commit -m "chore: daily update $(date +'%Y-%m-%d')" && git push
