@@ -38,6 +38,9 @@ TPEX_HEADERS = {
 }
 THEFEW_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
+# FinMind API token — set env var FINMIND_TOKEN or edit here directly
+FINMIND_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wNC0xMyAyMjoyNjoyNiIsInVzZXJfaWQiOiJzY3NoZW4xOTgxIiwiZW1haWwiOiJzY3NoZW4xOTgxQGhvdG1haWwuY29tIiwiaXAiOiIxMTEuMjQxLjE3Mi4xODQifQ.9IWTNot8qxyxDwUuDF5UNQIHnAqDmYyMVKLAd7mE6ag'
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_file = os.path.join(BASE_DIR, 'auction_fetcher.log')
 logging.basicConfig(
@@ -453,6 +456,35 @@ def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | Non
             log.debug(f'    yfinance {ticker} {start_str}: {exc}')
     return None
 
+def _get_finmind_price(code: str, d: datetime) -> float | None:
+    """Fetch closing price from FinMind TaiwanStockPrice dataset.
+
+    Covers both exchange-listed and 興櫃 stocks historically.
+    Requires FINMIND_TOKEN to be set.
+    """
+    if not FINMIND_TOKEN:
+        return None
+    date_str = d.strftime('%Y-%m-%d')
+    try:
+        r = requests.get(
+            'https://api.finmindtrade.com/api/v4/data',
+            params={
+                'dataset':    'TaiwanStockPrice',
+                'data_id':    code,
+                'start_date': date_str,
+                'end_date':   date_str,
+                'token':      FINMIND_TOKEN,
+            },
+            timeout=20,
+        )
+        data = r.json().get('data', [])
+        if data:
+            return float(data[0]['close'])
+    except Exception as e:
+        log.debug(f'FinMind {code} {date_str}: {e}')
+    return None
+
+
 # ── Main price lookup ─────────────────────────────────────────────────────────
 
 def get_closing_price(code: str, date_str: str, market: str = ''):
@@ -462,6 +494,8 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
     1. Check local price cache (built from OpenAPI daily downloads)
     2. yfinance — reliable historical data for both TWSE and OTC
     3. TPEX bulk day download (fallback, caches whole day)
+    4. TPEX ESB (興櫃 real-time, only useful for today's date)
+    5. FinMind TaiwanStockPrice (historical fallback, covers 興櫃)
     """
     code = str(code).strip()
     if not code or str(date_str).strip() in ('', 'nan', 'None'):
@@ -496,6 +530,13 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
     # 4. TPEX ESB (興櫃) — for stocks still on emerging market today.
     #    Only useful when auction date ≈ today; returns current average price.
     price = _get_esb_price(code)
+    if price is not None:
+        _cache_store(date_key, {code: price})
+        _save_price_cache()
+        return price
+
+    # 5. FinMind TaiwanStockPrice — historical fallback covering 興櫃 stocks.
+    price = _get_finmind_price(code, d)
     if price is not None:
         _cache_store(date_key, {code: price})
         _save_price_cache()
