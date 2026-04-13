@@ -128,7 +128,7 @@ td.bold { font-weight: 600; }
 
 <div class="hdr">
   <h1>TWSE / TPEX &nbsp;競價拍賣資料庫</h1>
-  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-13 21:14</div>
+  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-13 21:24</div>
 </div>
 
 <div class="ctrl" style="position:relative;">
@@ -264,7 +264,8 @@ function getAllColsOrdered() {
 }
 
 // ── Column filters ────────────────────────────────────────────────────────────
-const filters = {};   // colKey → {op, v1, v2}
+const filters   = {};   // colKey → {op, v1, v2}
+const filterRaw = {};   // colKey → raw string the user typed
 
 function parseFilter(str) {
   str = str.trim();
@@ -293,7 +294,8 @@ function applyFilter(f, n) {
 
 function onFilterInput(inp) {
   const key = inp.dataset.key;
-  const f   = parseFilter(inp.value);
+  filterRaw[key] = inp.value;          // keep raw text so rebuild can restore it
+  const f = parseFilter(inp.value);
   if (f) filters[key] = f; else delete filters[key];
   inp.classList.toggle('active', !!f);
   render();
@@ -619,7 +621,7 @@ function render() {
   }).join('') + '</tr>';
 
   // ── Filter row ──
-  // Remember which filter input has focus so we can restore it after innerHTML rebuild
+  // Remember focused filter input so we can restore it after innerHTML rebuild
   const focusedEl  = document.activeElement;
   const focusedKey = focusedEl?.classList?.contains('fi') ? focusedEl.dataset.key : null;
   const focusedPos = focusedKey ? focusedEl.selectionStart : 0;
@@ -629,7 +631,6 @@ function render() {
     const safeKey = c.k.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
     const curF    = filters[c.k];
     // Prefer raw text user typed (handles partial input like ">" or "90-")
-    // Fall back to reconstructed value from parsed filter
     let curV = '';
     if (c.k in filterRaw) {
       curV = filterRaw[c.k];
