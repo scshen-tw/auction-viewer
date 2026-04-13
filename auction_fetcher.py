@@ -14,7 +14,7 @@ import sys
 import time
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 import requests
 import pandas as pd
@@ -335,41 +335,6 @@ def _get_tpex_close_api(code: str, d: datetime):
         log.warning(f'    TPEX {code} {d.date()}: {exc}')
         return None
 
-# ── TPEX ESB (興櫃) current price ────────────────────────────────────────────
-
-_ESB_CACHE: dict | None = None   # cached snapshot of tpex_esb_latest_statistics
-
-def _get_esb_price(code: str) -> float | None:
-    """Return today's average price from TPEX ESB (興櫃) for `code`.
-
-    The ESB API has no historical endpoint, so this is only useful for
-    stocks still on the emerging market whose auction date is today/recent.
-    Uses `Average` (均價) as the proxy for closing price.
-    """
-    global _ESB_CACHE
-    if _ESB_CACHE is None:
-        try:
-            r = requests.get(
-                'https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics',
-                headers=TPEX_HEADERS, timeout=20)
-            r.raise_for_status()
-            _ESB_CACHE = {d['SecuritiesCompanyCode']: d for d in r.json()}
-            log.info(f'  ESB snapshot: {len(_ESB_CACHE)} 興櫃股票')
-        except Exception as exc:
-            log.warning(f'  ESB snapshot 下載失敗: {exc}')
-            _ESB_CACHE = {}
-    row = _ESB_CACHE.get(code)
-    if not row:
-        return None
-    for field in ('Average', 'LatestPrice', 'PreviousAveragePrice'):
-        v = str(row.get(field, '')).strip()
-        if v and v not in ('', '--', '---', '0', '0.00'):
-            try:
-                return float(v)
-            except ValueError:
-                pass
-    return None
-
 # ── TWSE bulk historical download (one call = all ~1300 stocks for a date) ────
 
 _TWSE_BULK_DATES: set[str] = set()  # dates where we've already done bulk download
@@ -409,53 +374,6 @@ def _get_twse_bulk_day(code: str, d: datetime):
         log.warning(f'    TWSE bulk {d.date()}: {exc}')
         return None
 
-# ── yfinance price lookup (reliable historical data, no rate limiting) ─────────
-
-try:
-    import yfinance as yf
-    _YF_AVAILABLE = True
-except ImportError:
-    _YF_AVAILABLE = False
-
-def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | None:
-    """Fetch closing price via yfinance.  Uses raw (non-adjusted) close.
-    Only returns price if data exists on the exact requested date.
-    """
-    if not _YF_AVAILABLE:
-        return None
-    import pandas as pd
-    start_str = d.strftime('%Y-%m-%d')
-    end_str   = (d + timedelta(days=1)).strftime('%Y-%m-%d')
-
-    # Determine which exchange suffix to try first
-    if '集中' in market:
-        suffixes = ['.TW', '.TWO']
-    elif '櫃' in market:
-        suffixes = ['.TWO', '.TW']
-    else:
-        suffixes = ['.TW', '.TWO']  # CB underlying: try both
-
-    for suffix in suffixes:
-        ticker = f'{code}{suffix}'
-        try:
-            df = yf.download(ticker, start=start_str, end=end_str,
-                             progress=False, auto_adjust=False)
-            if df.empty:
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                close_series = df[('Close', ticker)]
-            else:
-                close_series = df['Close']
-            close_series = close_series.dropna()
-            if close_series.empty:
-                continue
-            val = float(close_series.iloc[-1])
-            if val and val > 0:
-                return val
-        except Exception as exc:
-            log.debug(f'    yfinance {ticker} {start_str}: {exc}')
-    return None
-
 def _get_finmind_price(code: str, d: datetime) -> float | None:
     """Fetch closing price from FinMind TaiwanStockPrice dataset.
 
@@ -491,11 +409,10 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
     """Get closing price for a stock on a given date.
 
     Strategy:
-    1. Check local price cache (built from OpenAPI daily downloads)
-    2. yfinance — reliable historical data for both TWSE and OTC
-    3. TPEX bulk day download (fallback, caches whole day)
-    4. TPEX ESB (興櫃 real-time, only useful for today's date)
-    5. FinMind TaiwanStockPrice (historical fallback, covers 興櫃)
+    1. Check local price cache
+    2. TWSE bulk API (上市證交所，一次抓整日所有股票)
+    3. TPEX bulk API (上櫃櫃台買賣中心，一次抓整日所有股票)
+    4. FinMind TaiwanStockPrice (歷史資料，含興櫃)
     """
     code = str(code).strip()
     if not code or str(date_str).strip() in ('', 'nan', 'None'):
@@ -514,28 +431,19 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
 
     time.sleep(0.2)
 
-    # 2. yfinance (handles both TWSE and OTC, historical dates, no rate limits)
-    price = _get_yfinance_price(code, d, market)
+    # 2. TWSE bulk API (上市證交所)
+    price = _get_twse_bulk_day(code, d)
     if price is not None:
-        _cache_store(date_key, {code: price})
         _save_price_cache()
         return price
 
-    # 3. TPEX bulk day download (caches ALL OTC stocks — useful when yfinance misses)
+    # 3. TPEX bulk API (上櫃櫃台買賣中心)
     price = _get_tpex_close_api(code, d)
     if price is not None:
         _save_price_cache()
         return price
 
-    # 4. TPEX ESB (興櫃) — for stocks still on emerging market today.
-    #    Only useful when auction date ≈ today; returns current average price.
-    price = _get_esb_price(code)
-    if price is not None:
-        _cache_store(date_key, {code: price})
-        _save_price_cache()
-        return price
-
-    # 5. FinMind TaiwanStockPrice — historical fallback covering 興櫃 stocks.
+    # 4. FinMind TaiwanStockPrice (歷史 fallback，含興櫃)
     price = _get_finmind_price(code, d)
     if price is not None:
         _cache_store(date_key, {code: price})
