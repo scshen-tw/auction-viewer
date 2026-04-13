@@ -332,6 +332,41 @@ def _get_tpex_close_api(code: str, d: datetime):
         log.warning(f'    TPEX {code} {d.date()}: {exc}')
         return None
 
+# ── TPEX ESB (興櫃) current price ────────────────────────────────────────────
+
+_ESB_CACHE: dict | None = None   # cached snapshot of tpex_esb_latest_statistics
+
+def _get_esb_price(code: str) -> float | None:
+    """Return today's average price from TPEX ESB (興櫃) for `code`.
+
+    The ESB API has no historical endpoint, so this is only useful for
+    stocks still on the emerging market whose auction date is today/recent.
+    Uses `Average` (均價) as the proxy for closing price.
+    """
+    global _ESB_CACHE
+    if _ESB_CACHE is None:
+        try:
+            r = requests.get(
+                'https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics',
+                headers=TPEX_HEADERS, timeout=20)
+            r.raise_for_status()
+            _ESB_CACHE = {d['SecuritiesCompanyCode']: d for d in r.json()}
+            log.info(f'  ESB snapshot: {len(_ESB_CACHE)} 興櫃股票')
+        except Exception as exc:
+            log.warning(f'  ESB snapshot 下載失敗: {exc}')
+            _ESB_CACHE = {}
+    row = _ESB_CACHE.get(code)
+    if not row:
+        return None
+    for field in ('Average', 'LatestPrice', 'PreviousAveragePrice'):
+        v = str(row.get(field, '')).strip()
+        if v and v not in ('', '--', '---', '0', '0.00'):
+            try:
+                return float(v)
+            except ValueError:
+                pass
+    return None
+
 # ── TWSE bulk historical download (one call = all ~1300 stocks for a date) ────
 
 _TWSE_BULK_DATES: set[str] = set()  # dates where we've already done bulk download
@@ -380,12 +415,19 @@ except ImportError:
     _YF_AVAILABLE = False
 
 def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | None:
-    """Fetch closing price via yfinance.  Uses raw (non-adjusted) close."""
+    """Fetch closing price via yfinance.  Uses raw (non-adjusted) close.
+
+    If the exact date has no data (stock not yet listed — e.g. auction date is
+    before the IPO listing date), extends the window up to 10 calendar days
+    forward to find the first available post-listing close price.
+    """
     if not _YF_AVAILABLE:
         return None
-    end = d + timedelta(days=1)
+    import pandas as pd
     start_str = d.strftime('%Y-%m-%d')
-    end_str   = end.strftime('%Y-%m-%d')
+    # Extend window: exact date + up to 20 calendar days to capture pre-listing auctions
+    # (typical gap between 興櫃 auction end date and TWSE/TPEX listing date is 11~14 days)
+    end_str   = (d + timedelta(days=21)).strftime('%Y-%m-%d')
 
     # Determine which exchange suffix to try first
     if '集中' in market:
@@ -402,11 +444,27 @@ def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | Non
                              progress=False, auto_adjust=False)
             if df.empty:
                 continue
-            close_col = ('Close', ticker)
-            if close_col in df.columns:
-                val = float(df[close_col].iloc[-1])
+            # Find price on target date; if not available, use the next trading day
+            # (handles case where auction date is before IPO listing date)
+            target = pd.Timestamp(d.date())
+            if isinstance(df.columns, pd.MultiIndex):
+                close_series = df[('Close', ticker)]
             else:
-                val = float(df['Close'].iloc[-1])
+                close_series = df['Close']
+            close_series = close_series.dropna()
+            if close_series.empty:
+                continue
+            if target in close_series.index:
+                val = float(close_series.loc[target])
+            else:
+                # Use first available date on or after target (within window)
+                future = close_series[close_series.index >= target]
+                if future.empty:
+                    continue
+                val = float(future.iloc[0])
+                days_gap = (future.index[0] - target).days
+                log.debug(f'    yfinance {ticker}: no data on {start_str}, '
+                          f'using {future.index[0].date()} (+{days_gap}d)')
             if val and val > 0:
                 return val
         except Exception as exc:
@@ -450,6 +508,14 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
     # 3. TPEX bulk day download (caches ALL OTC stocks — useful when yfinance misses)
     price = _get_tpex_close_api(code, d)
     if price is not None:
+        _save_price_cache()
+        return price
+
+    # 4. TPEX ESB (興櫃) — for stocks still on emerging market today.
+    #    Only useful when auction date ≈ today; returns current average price.
+    price = _get_esb_price(code)
+    if price is not None:
+        _cache_store(date_key, {code: price})
         _save_price_cache()
     return price
 
