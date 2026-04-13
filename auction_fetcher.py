@@ -416,18 +416,13 @@ except ImportError:
 
 def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | None:
     """Fetch closing price via yfinance.  Uses raw (non-adjusted) close.
-
-    If the exact date has no data (stock not yet listed — e.g. auction date is
-    before the IPO listing date), extends the window up to 10 calendar days
-    forward to find the first available post-listing close price.
+    Only returns price if data exists on the exact requested date.
     """
     if not _YF_AVAILABLE:
         return None
     import pandas as pd
     start_str = d.strftime('%Y-%m-%d')
-    # Extend window: exact date + up to 20 calendar days to capture pre-listing auctions
-    # (typical gap between 興櫃 auction end date and TWSE/TPEX listing date is 11~14 days)
-    end_str   = (d + timedelta(days=21)).strftime('%Y-%m-%d')
+    end_str   = (d + timedelta(days=1)).strftime('%Y-%m-%d')
 
     # Determine which exchange suffix to try first
     if '集中' in market:
@@ -444,9 +439,6 @@ def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | Non
                              progress=False, auto_adjust=False)
             if df.empty:
                 continue
-            # Find price on target date; if not available, use the next trading day
-            # (handles case where auction date is before IPO listing date)
-            target = pd.Timestamp(d.date())
             if isinstance(df.columns, pd.MultiIndex):
                 close_series = df[('Close', ticker)]
             else:
@@ -454,17 +446,7 @@ def _get_yfinance_price(code: str, d: datetime, market: str = '') -> float | Non
             close_series = close_series.dropna()
             if close_series.empty:
                 continue
-            if target in close_series.index:
-                val = float(close_series.loc[target])
-            else:
-                # Use first available date on or after target (within window)
-                future = close_series[close_series.index >= target]
-                if future.empty:
-                    continue
-                val = float(future.iloc[0])
-                days_gap = (future.index[0] - target).days
-                log.debug(f'    yfinance {ticker}: no data on {start_str}, '
-                          f'using {future.index[0].date()} (+{days_gap}d)')
+            val = float(close_series.iloc[-1])
             if val and val > 0:
                 return val
         except Exception as exc:
