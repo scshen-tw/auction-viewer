@@ -284,96 +284,6 @@ def download_today_prices() -> str:
         _save_price_cache()
     return date_key or ''
 
-# ── Legacy per-stock fallback (for historical dates not in cache) ─────────────
-
-def _get_twse_close_api(code: str, d: datetime):
-    """One-stock TWSE STOCK_DAY API — single attempt, fast fail on 307."""
-    url = 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY'
-    target = f"{ad_to_roc(d.year)}/{d.month:02d}/{d.day:02d}"
-    try:
-        r = requests.get(url, params={'stockNo': code,
-            'date': d.strftime('%Y%m%d'), 'response': 'json'},
-            headers=TWSE_HEADERS, timeout=15)
-        if r.status_code == 307:
-            return None  # Rate limited — fall through to TPEX bulk
-        data = r.json()
-        if data.get('stat') != 'OK':
-            return None
-        for row in data.get('data', []):
-            if row[0] == target:
-                return float(row[6].replace(',', ''))
-        return None
-    except Exception as exc:
-        log.warning(f'    TWSE {code} {d.date()}: {exc}')
-        return None
-
-def _get_tpex_close_api(code: str, d: datetime):
-    """One-day TPEX bulk download for a specific date."""
-    roc_date = f"{ad_to_roc(d.year)}/{d.month:02d}/{d.day:02d}"
-    url = ('https://www.tpex.org.tw/web/stock/aftertrading/'
-           'otc_quotes_no1430/stk_wn1430_result.php')
-    params = {'l': 'zh-tw', 'o': 'json', 'd': roc_date, 'se': 'EW', 'st': 'stkno'}
-    try:
-        r = requests.get(url, params=params, headers=TPEX_HEADERS, timeout=30)
-        r.raise_for_status()
-        day_prices = {}
-        tables = r.json().get('tables', [])
-        if tables:
-            for row in tables[0].get('data', []):
-                c = str(row[0]).strip()
-                p = str(row[2]).strip()
-                if p and p not in ('', '--', 'N/A'):
-                    try:
-                        day_prices[c] = float(p.replace(',', ''))
-                    except ValueError:
-                        pass
-        # Cache the whole day
-        date_key = d.strftime('%Y-%m-%d')
-        _cache_store(date_key, day_prices)
-        return day_prices.get(code)
-    except Exception as exc:
-        log.warning(f'    TPEX {code} {d.date()}: {exc}')
-        return None
-
-# ── TWSE bulk historical download (one call = all ~1300 stocks for a date) ────
-
-_TWSE_BULK_DATES: set[str] = set()  # dates where we've already done bulk download
-
-def _get_twse_bulk_day(code: str, d: datetime):
-    """Bulk-download ALL TWSE stocks for a historical date via STOCK_DAY_ALL.
-    Caches the whole day (like TPEX bulk).  Returns price for `code` or None.
-    """
-    date_key = d.strftime('%Y-%m-%d')
-    if date_key in _TWSE_BULK_DATES:
-        return _cache_lookup(code, date_key)  # Already attempted; stock not on TWSE
-
-    url = 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL'
-    try:
-        r = requests.get(url,
-                         params={'date': d.strftime('%Y%m%d'), 'response': 'json'},
-                         headers=TWSE_HEADERS, timeout=20)
-        if r.status_code == 307:
-            return None  # Rate limited — skip silently
-        data = r.json()
-        if data.get('stat') != 'OK':
-            _TWSE_BULK_DATES.add(date_key)
-            return None
-        day_prices = {}
-        for row in data.get('data', []):
-            c = str(row[0]).strip()
-            try:
-                day_prices[c] = float(str(row[6]).replace(',', ''))
-            except (ValueError, IndexError):
-                pass
-        _cache_store(date_key, day_prices)
-        _TWSE_BULK_DATES.add(date_key)
-        if day_prices:
-            log.info(f'    TWSE bulk {date_key}: {len(day_prices)} 筆')
-        return day_prices.get(code)
-    except Exception as exc:
-        log.warning(f'    TWSE bulk {d.date()}: {exc}')
-        return None
-
 def _get_finmind_price(code: str, d: datetime) -> float | None:
     """Fetch closing price from FinMind TaiwanStockPrice dataset.
 
@@ -406,14 +316,7 @@ def _get_finmind_price(code: str, d: datetime) -> float | None:
 # ── Main price lookup ─────────────────────────────────────────────────────────
 
 def get_closing_price(code: str, date_str: str, market: str = ''):
-    """Get closing price for a stock on a given date.
-
-    Strategy:
-    1. Check local price cache
-    2. TWSE bulk API (上市證交所，一次抓整日所有股票)
-    3. TPEX bulk API (上櫃櫃台買賣中心，一次抓整日所有股票)
-    4. FinMind TaiwanStockPrice (歷史資料，含興櫃)
-    """
+    """Get closing price for a stock on a given date via FinMind API."""
     code = str(code).strip()
     if not code or str(date_str).strip() in ('', 'nan', 'None'):
         return None
@@ -424,26 +327,12 @@ def get_closing_price(code: str, date_str: str, market: str = ''):
     except Exception:
         return None
 
-    # 1. Cache hit — return immediately without any sleep
+    # 1. Cache hit — return immediately
     cached = _cache_lookup(code, date_key)
     if cached is not None:
         return cached
 
-    time.sleep(0.2)
-
-    # 2. TWSE bulk API (上市證交所)
-    price = _get_twse_bulk_day(code, d)
-    if price is not None:
-        _save_price_cache()
-        return price
-
-    # 3. TPEX bulk API (上櫃櫃台買賣中心)
-    price = _get_tpex_close_api(code, d)
-    if price is not None:
-        _save_price_cache()
-        return price
-
-    # 4. FinMind TaiwanStockPrice (歷史 fallback，含興櫃)
+    # 2. FinMind TaiwanStockPrice (上市、上櫃、興櫃 歷史資料)
     price = _get_finmind_price(code, d)
     if price is not None:
         _cache_store(date_key, {code: price})
