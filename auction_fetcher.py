@@ -449,19 +449,53 @@ def _record_key(row: pd.Series) -> tuple:
     return (str(row.get('投標開始日', '')).strip(),
             str(row.get('證券代號',   '')).strip())
 
+# ── TCRI lookup ───────────────────────────────────────────────────────────────
+
+def load_tcri_map() -> dict:
+    """Read TCRI Excel files from BASE_DIR and return {stock_code_str: tcri_int}."""
+    import glob
+    tcri_map = {}
+    pattern = os.path.join(BASE_DIR, '*TCRI*.xlsx')
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return tcri_map
+    for fpath in files:
+        try:
+            df = pd.read_excel(fpath, header=0)
+            code_col = df.columns[0]
+            tcri_col = next((c for c in df.columns if str(c).upper() == 'TCRI'), None)
+            if tcri_col is None:
+                continue
+            for _, row in df.iterrows():
+                code = str(row[code_col]).strip().split('.')[0].zfill(4)
+                val  = row[tcri_col]
+                try:
+                    tcri_map[code] = int(val)
+                except (ValueError, TypeError):
+                    pass
+        except Exception as e:
+            log.warning(f'TCRI 檔案讀取失敗 {fpath}: {e}')
+    log.info(f'TCRI 對照表：{len(tcri_map)} 筆（來源：{[os.path.basename(f) for f in files]}）')
+    return tcri_map
+
 # ── HTML generation ───────────────────────────────────────────────────────────
 
 def generate_html(stocks: pd.DataFrame, cbs: pd.DataFrame) -> None:
+    import json as _json
     stocks_json = stocks.to_json(orient='records', force_ascii=False)
     cbs_json    = cbs.to_json(orient='records', force_ascii=False)
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    tcri_map     = load_tcri_map()
+    tcri_map_js  = _json.dumps(tcri_map, ensure_ascii=False)
 
     html = _HTML_TEMPLATE \
         .replace('__TIMESTAMP__', now) \
         .replace('__N_STOCKS__', str(len(stocks))) \
         .replace('__N_CBS__', str(len(cbs))) \
         .replace('__STOCKS_JSON__', stocks_json) \
-        .replace('__CBS_JSON__', cbs_json)
+        .replace('__CBS_JSON__', cbs_json) \
+        .replace('__TCRI_MAP__', tcri_map_js)
 
     with open(HTML_FILE, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -766,6 +800,7 @@ const RAW = {
   stocks: __STOCKS_JSON__,
   cbs:    __CBS_JSON__
 };
+const TCRI_MAP = __TCRI_MAP__;
 
 const STOCK_COLS = [
   {k:'開標日期',                    lab:'開標日期',    t:'date'},
@@ -801,6 +836,8 @@ const CB_COLS = [
   {k:'最高得標價格(元)',             lab:'最高得標',    t:'num'},
   {k:'得標加權平均價格(元)',         lab:'得標均價',    t:'num'},
   {k:'實際承銷價格(元)',             lab:'承銷價',      t:'num'},
+  {k:'TCRI',                        lab:'TCRI',        t:'num',
+   calc: r => { const c = String(r['證券代號']).substring(0,4); const v = TCRI_MAP[c]; return v !== undefined ? v : NaN; }},
   {k:'發行時轉換價',                 lab:'發行轉換價',  t:'num'},
   {k:'投標結束日收盤價',             lab:'結束日收盤',  t:'num',  cmp:true},
   {k:'截拍日Parity',                lab:'截拍Parity%', t:'num',  decimals:1,
