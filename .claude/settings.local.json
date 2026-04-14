@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--VS-Code-Auction\\\\10cb49ec-1b44-4797-b679-8fb80f4bf10f\\\\tasks\\\\bmz514pqu.output' -Encoding UTF8\")",
+      "Bash(powershell -Command ':*)",
+      "Bash(powershell -Command 'Get-Content '\\\\''d:\\\\VS Code\\\\Auction\\\\auction_fetcher.log'\\\\'' -Encoding UTF8 | Where-Object { $_ -match '\\\\''\\(WARNING|ERROR|TWSE|TPEX\\)'\\\\'' } | Select-Object -Last 20')"
+    ]
+  }
+}
