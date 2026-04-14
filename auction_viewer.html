@@ -141,7 +141,7 @@ td.bold { font-weight: 600; }
 
 <div class="hdr">
   <h1>TWSE / TPEX &nbsp;競價拍賣資料庫</h1>
-  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-14 13:43</div>
+  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-14 13:53</div>
 </div>
 
 <div class="ctrl" style="position:relative;">
@@ -192,9 +192,9 @@ const STOCK_COLS = [
   {k:'發行市場',                    lab:'市場',        t:'str'},
   {k:'發行性質',                    lab:'性質',        t:'str'},
   {k:'投標結束日',                  lab:'投標結束',    t:'date'},
-  {k:'競拍數量(張)',                 lab:'競拍量(張)',  t:'num'},
+  {k:'競拍數量(張)',                 lab:'競拍量(張)',  t:'num',  decimals:0},
   {k:'最低投標價格(元)',             lab:'最低投標價',  t:'num'},
-  {k:'合格投標數量(張)',             lab:'合格投標量',  t:'num'},
+  {k:'合格投標數量(張)',             lab:'合格投標量',  t:'num',  decimals:0},
   {k:'最低得標價格(元)',             lab:'最低得標',    t:'num'},
   {k:'最高得標價格(元)',             lab:'最高得標',    t:'num'},
   {k:'得標加權平均價格(元)',         lab:'得標均價',    t:'num'},
@@ -212,9 +212,9 @@ const CB_COLS = [
   {k:'發行市場',                    lab:'市場',        t:'str'},
   {k:'發行性質',                    lab:'性質',        t:'str'},
   {k:'投標結束日',                  lab:'投標結束',    t:'date'},
-  {k:'競拍數量(張)',                 lab:'競拍量(張)',  t:'num'},
+  {k:'競拍數量(張)',                 lab:'競拍量(張)',  t:'num',  decimals:0},
   {k:'最低投標價格(元)',             lab:'最低投標價',  t:'num'},
-  {k:'合格投標數量(張)',             lab:'合格投標量',  t:'num'},
+  {k:'合格投標數量(張)',             lab:'合格投標量',  t:'num',  decimals:0},
   {k:'最低得標價格(元)',             lab:'最低得標',    t:'num'},
   {k:'最高得標價格(元)',             lab:'最高得標',    t:'num'},
   {k:'得標加權平均價格(元)',         lab:'得標均價',    t:'num'},
