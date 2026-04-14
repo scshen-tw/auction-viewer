@@ -741,6 +741,7 @@ td.bold { font-weight: 600; }
 .b-otc   { background: #d1fae5; color: #065f46; }
 .b-cncl  { background: #fee2e2; color: #991b1b; }
 .b-pend  { background: #fef9c3; color: #92400e; }
+.txt-secured { color: #1d4ed8; font-weight: 500; }
 
 /* highlight: 收盤 vs 得標均價 */
 .hi-up  { color: #dc2626; font-weight: 600; }   /* 收盤 > 得標均價 (positive for bidders) */
@@ -812,8 +813,8 @@ td.bold { font-weight: 600; }
 
 <div class="ctrl" style="position:relative;">
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('stocks')">股票競拍 (__N_STOCKS__)</button>
-    <button class="tab"        onclick="switchTab('cbs')">CB競拍 (__N_CBS__)</button>
+    <button class="tab"        onclick="switchTab('stocks')">股票競拍 (__N_STOCKS__)</button>
+    <button class="tab active" onclick="switchTab('cbs')">CB競拍 (__N_CBS__)</button>
   </div>
   <input type="search" id="search" placeholder="搜尋代號、名稱…" oninput="render()">
   <button id="btn-refresh" onclick="doRefresh()" title="手動更新資料（需透過 auction_server.py 啟動）">
@@ -896,7 +897,7 @@ const CB_COLS = [
   {k:'取消競價拍賣(流標或取消)',      lab:'取消/流標',  t:'str'},
 ];
 
-let tab     = 'stocks';
+let tab     = 'cbs';
 let sortKey = '開標日期';
 let sortDir = -1;
 
@@ -1320,6 +1321,9 @@ function cellHtml(col, row) {
   }
   if (col.k === '取消競價拍賣(流標或取消)' && str) {
     return `<span class="badge b-cncl">${str}</span>`;
+  }
+  if (col.k === '發行性質' && str.includes('有擔')) {
+    return `<span class="txt-secured">${str}</span>`;
   }
   if (col.t === 'num') {
     const n = typeof raw === 'number' ? raw : nv(raw);
