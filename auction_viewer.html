@@ -141,7 +141,7 @@ td.bold { font-weight: 600; }
 
 <div class="hdr">
   <h1>TWSE / TPEX &nbsp;競價拍賣資料庫</h1>
-  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-14 14:24</div>
+  <div class="meta">資料來源：臺灣證券交易所 &nbsp;｜&nbsp; 最後更新：2026-04-14 14:31</div>
 </div>
 
 <div class="ctrl" style="position:relative;">
@@ -410,20 +410,39 @@ document.addEventListener('DOMContentLoaded', () => applyFontSize(_fontSize));
 let _colWidths = (() => { try { return JSON.parse(localStorage.getItem('colWidths') || '{}'); } catch(e) { return {}; } })();
 let _rz = null;
 
+function _freezeAllCols() {
+  // 把所有欄位凍結成當前實際寬度，table 改為 auto 可自由延伸
+  const tbl = document.querySelector('table');
+  tbl.style.tableLayout = 'fixed';
+  tbl.style.width = 'auto';
+  document.querySelectorAll('#thead tr:first-child th').forEach(th => {
+    const w = th.offsetWidth;
+    th.style.width    = w + 'px';
+    th.style.minWidth = w + 'px';
+  });
+}
+
 function initResizers() {
   const widths = _colWidths[tab] || {};
   const tbl    = document.querySelector('table');
   const hasW   = Object.keys(widths).length > 0;
-  tbl.style.tableLayout = hasW ? 'fixed' : '';
-  document.querySelectorAll('#thead tr:first-child th').forEach(th => {
-    const w = widths[th.dataset.colKey];
-    if (w) { th.style.width = w + 'px'; th.style.minWidth = w + 'px'; }
-    else   { th.style.width = ''; th.style.minWidth = ''; }
-  });
+  if (hasW) {
+    tbl.style.tableLayout = 'fixed';
+    tbl.style.width = 'auto';
+    document.querySelectorAll('#thead tr:first-child th').forEach(th => {
+      const w = widths[th.dataset.colKey];
+      if (w) { th.style.width = w + 'px'; th.style.minWidth = w + 'px'; }
+      else   { th.style.width = ''; th.style.minWidth = ''; }
+    });
+  } else {
+    tbl.style.tableLayout = '';
+    tbl.style.width = '';
+  }
 }
 
 function onRzDown(e, el) {
   e.preventDefault(); e.stopPropagation();
+  _freezeAllCols();   // 凍結所有欄，拖拉時只動被拉的那欄
   const th = el.closest('th');
   _rz = { th, el, startX: e.clientX, startW: th.offsetWidth };
   el.classList.add('active');
@@ -437,17 +456,17 @@ function onRzMove(e) {
   const w = Math.max(36, _rz.startW + e.clientX - _rz.startX);
   _rz.th.style.width    = w + 'px';
   _rz.th.style.minWidth = w + 'px';
-  document.querySelector('table').style.tableLayout = 'fixed';
 }
 
 function onRzUp() {
   if (!_rz) return;
-  const key = _rz.th.dataset.colKey;
-  if (key) {
-    if (!_colWidths[tab]) _colWidths[tab] = {};
-    _colWidths[tab][key] = _rz.th.offsetWidth;
-    localStorage.setItem('colWidths', JSON.stringify(_colWidths));
-  }
+  // 儲存所有欄位當前寬度
+  if (!_colWidths[tab]) _colWidths[tab] = {};
+  document.querySelectorAll('#thead tr:first-child th').forEach(th => {
+    const key = th.dataset.colKey;
+    if (key) _colWidths[tab][key] = th.offsetWidth;
+  });
+  localStorage.setItem('colWidths', JSON.stringify(_colWidths));
   _rz.el.classList.remove('active');
   document.body.classList.remove('col-resizing');
   _rz = null;
@@ -457,11 +476,15 @@ function onRzUp() {
 
 function onRzDblClick(e, el) {
   e.stopPropagation();
-  const key = el.closest('th').dataset.colKey;
-  if (!key || !_colWidths[tab]) return;
-  delete _colWidths[tab][key];
-  if (Object.keys(_colWidths[tab]).length === 0) delete _colWidths[tab];
+  // 雙擊重置所有欄位寬度
+  delete _colWidths[tab];
   localStorage.setItem('colWidths', JSON.stringify(_colWidths));
+  const tbl = document.querySelector('table');
+  tbl.style.tableLayout = '';
+  tbl.style.width = '';
+  document.querySelectorAll('#thead tr:first-child th').forEach(th => {
+    th.style.width = ''; th.style.minWidth = '';
+  });
   initResizers();
 }
 
