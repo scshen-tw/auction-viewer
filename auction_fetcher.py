@@ -38,8 +38,16 @@ TPEX_HEADERS = {
 }
 THEFEW_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
-# FinMind API token — set env var FINMIND_TOKEN or edit here directly
-FINMIND_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wNC0xMyAyMjoyNjoyNiIsInVzZXJfaWQiOiJzY3NoZW4xOTgxIiwiZW1haWwiOiJzY3NoZW4xOTgxQGhvdG1haWwuY29tIiwiaXAiOiIxMTEuMjQxLjE3Mi4xODQifQ.9IWTNot8qxyxDwUuDF5UNQIHnAqDmYyMVKLAd7mE6ag'
+# FinMind API token — 從本機 finmind_token.txt 讀取（不進 git）
+def _load_finmind_token() -> str:
+    token = os.environ.get('FINMIND_TOKEN', '')
+    if token:
+        return token
+    token_file = os.path.join(BASE_DIR, 'finmind_token.txt')
+    if os.path.exists(token_file):
+        return open(token_file, encoding='utf-8').read().strip()
+    return ''
+FINMIND_TOKEN = _load_finmind_token()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_file = os.path.join(BASE_DIR, 'auction_fetcher.log')
