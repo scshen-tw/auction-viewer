@@ -353,7 +353,38 @@ def is_cb(code: str) -> bool:
 def cb_underlying_code(cb_code: str) -> str:
     return str(cb_code).strip()[:4]
 
+_tpex_cb_cache: dict | None = None  # {cb_code_str: float}
+
+def _load_tpex_cb_map() -> dict:
+    """一次抓 TPEX bond_ISSBD5_data，建立 {CB代號: 發行時轉換價} 快取。"""
+    global _tpex_cb_cache
+    if _tpex_cb_cache is not None:
+        return _tpex_cb_cache
+    _tpex_cb_cache = {}
+    try:
+        r = requests.get('https://www.tpex.org.tw/openapi/v1/bond_ISSBD5_data', timeout=20)
+        r.raise_for_status()
+        for item in r.json():
+            code  = str(item.get('BondCode', '')).strip()
+            price = str(item.get('Conversion/ExchangePriceAtIssuance', '')).strip()
+            if code and price:
+                try:
+                    _tpex_cb_cache[code] = float(price)
+                except (ValueError, TypeError):
+                    pass
+        log.info(f'TPEX CB 轉換價對照表：{len(_tpex_cb_cache)} 筆')
+    except Exception as e:
+        log.warning(f'TPEX bond_ISSBD5_data 載入失敗: {e}')
+    return _tpex_cb_cache
+
 def get_cb_conversion_price(cb_code: str):
+    """取得 CB 發行時轉換價。先查 TPEX 官方 API，未掛牌者 fallback 至 thefew.tw。"""
+    cb_code = str(cb_code).strip()
+    # ① TPEX 官方 API（已掛牌）
+    cb_map = _load_tpex_cb_map()
+    if cb_code in cb_map:
+        return cb_map[cb_code]
+    # ② fallback：爬 thefew.tw（競拍後尚未掛牌的 CB）
     try:
         r    = requests.get(f'https://thefew.tw/quote/{cb_code}',
                             headers=THEFEW_HEADERS, timeout=20)
@@ -365,7 +396,7 @@ def get_cb_conversion_price(cb_code: str):
                 return float(tds[i + 1].get_text(strip=True).replace(',', ''))
         return None
     except Exception as exc:
-        log.warning(f'    CB {cb_code} thefew.tw: {exc}')
+        log.debug(f'    CB {cb_code} thefew.tw: {exc}')
         return None
 
 # ── Enrich ────────────────────────────────────────────────────────────────────
@@ -526,6 +557,8 @@ def download_history() -> None:
 # ── Mode 2: Incremental update ────────────────────────────────────────────────
 
 def update_data() -> None:
+    global _tpex_cb_cache
+    _tpex_cb_cache = None   # 每次更新強制重抓最新轉換價表
     log.info('=== 增量更新 ===')
     _load_price_cache()
     log.info('下載今日全市場收盤價 (OpenAPI)…')
@@ -615,6 +648,30 @@ def update_data() -> None:
 
     stocks_exist = backfill_close(stocks_exist, False, cbs_exist, True)
     cbs_exist    = backfill_close(cbs_exist,    True,  stocks_exist, False)
+
+    # ── 4. Backfill missing CB conversion prices (TPEX API, bulk) ─────────
+    def backfill_conv_price(df):
+        if df.empty or '發行時轉換價' not in df.columns:
+            return df
+        mask = df['發行時轉換價'].isna() | df['發行時轉換價'].isin(['nan', 'None', ''])
+        missing = df[mask]
+        if missing.empty:
+            return df
+        _load_tpex_cb_map()   # 預先載入快取，後續 get_cb_conversion_price 直接命中
+        filled = 0
+        for idx, row in missing.iterrows():
+            code = str(row['證券代號']).strip()
+            cp = get_cb_conversion_price(code)   # TPEX first, thefew fallback
+            if cp is not None:
+                df.at[idx, '發行時轉換價'] = str(cp)
+                filled += 1
+        if filled:
+            log.info(f'  補填轉換價：{filled} 筆')
+        return df
+
+    cbs_exist = backfill_conv_price(cbs_exist)
+    if not new_cbs.empty:
+        new_cbs = backfill_conv_price(new_cbs)
 
     stocks_all = pd.concat([stocks_exist, new_stocks], ignore_index=True)
     cbs_all    = pd.concat([cbs_exist,    new_cbs],    ignore_index=True)
