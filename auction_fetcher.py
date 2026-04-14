@@ -620,6 +620,49 @@ def update_data() -> None:
     cbs_all    = pd.concat([cbs_exist,    new_cbs],    ignore_index=True)
     save_data(stocks_all, cbs_all)
     log.info('=== 增量更新完成 ===')
+    _git_push()
+
+# ── Git auto-push ──────────────────────────────────────────────────────────────
+
+def _git_push() -> None:
+    """Commit changed data/HTML files and push to GitHub Pages."""
+    import subprocess
+    repo = BASE_DIR
+    targets = ['auction_stocks.json', 'auction_cbs.json',
+               'price_cache.json',   'auction_viewer.html']
+    # Only stage files that actually exist and have changes
+    changed = []
+    for f in targets:
+        path = os.path.join(repo, f)
+        if not os.path.exists(path):
+            continue
+        r = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', f],
+                           cwd=repo, capture_output=True)
+        if r.returncode != 0:   # non-zero = file has changes
+            changed.append(f)
+        else:
+            # also check untracked
+            r2 = subprocess.run(['git', 'ls-files', '--error-unmatch', f],
+                                cwd=repo, capture_output=True)
+            if r2.returncode != 0:
+                changed.append(f)
+
+    if not changed:
+        log.info('Git: 無異動，略過 push')
+        return
+
+    log.info(f'Git: 準備 commit {changed}')
+    subprocess.run(['git', 'add'] + changed, cwd=repo, check=True)
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+    msg = f'auto update {now_str}'
+    subprocess.run(['git', 'commit', '-m', msg], cwd=repo, check=True)
+
+    result = subprocess.run(['git', 'push'], cwd=repo, capture_output=True, text=True)
+    if result.returncode == 0:
+        log.info('Git: push 成功')
+    else:
+        log.error(f'Git: push 失敗\n{result.stderr}')
 
 # ── HTML Template ─────────────────────────────────────────────────────────────
 
