@@ -710,7 +710,7 @@ table { width: 100%; border-collapse: collapse; background: #fff; }
 thead { position: sticky; top: 0; z-index: 10; }
 thead tr:first-child { background: #243b5e; color: #fff; }
 th { position: relative; padding: 8px 10px; text-align: left; white-space: nowrap; cursor: pointer;
-     user-select: none; font-weight: 500; font-size: 12px; border-right: 1px solid #2d4c72; overflow: hidden; }
+     user-select: none; font-weight: 500; border-right: 1px solid #2d4c72; overflow: hidden; }
 th:hover { background: #2d5a8e; }
 .resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 6px;
            cursor: col-resize; z-index: 2; border-right: 2px solid transparent; }
@@ -721,7 +721,8 @@ th .si { margin-left: 5px; opacity: .5; font-size: 10px; }
 th.asc  .si::after { content: '▲'; opacity: 1; }
 th.desc .si::after { content: '▼'; opacity: 1; }
 th:not(.asc):not(.desc) .si::after { content: '⇅'; }
-td { padding: 6px 10px; border-bottom: 1px solid #eaedf1; white-space: nowrap; vertical-align: middle; }
+td { padding: 6px 10px; border-bottom: 1px solid #eaedf1; white-space: nowrap; vertical-align: middle;
+     overflow: hidden; text-overflow: ellipsis; max-width: 0; }
 tr:hover td { background: #e8f0ff !important; }
 
 /* row status */
@@ -735,7 +736,7 @@ td.mono { font-family: 'Consolas', monospace; font-size: 12px; }
 td.bold { font-weight: 600; }
 
 /* badges */
-.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 500; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.8em; font-weight: 500; }
 .b-tse   { background: #dbeafe; color: #1e40af; }
 .b-otc   { background: #d1fae5; color: #065f46; }
 .b-cncl  { background: #fee2e2; color: #991b1b; }
