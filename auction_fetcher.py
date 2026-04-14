@@ -722,7 +722,7 @@ th.asc  .si::after { content: '▲'; opacity: 1; }
 th.desc .si::after { content: '▼'; opacity: 1; }
 th:not(.asc):not(.desc) .si::after { content: '⇅'; }
 td { padding: 6px 10px; border-bottom: 1px solid #eaedf1; white-space: nowrap; vertical-align: middle;
-     overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+     overflow: hidden; text-overflow: ellipsis; }
 tr:hover td { background: #e8f0ff !important; }
 
 /* row status */
