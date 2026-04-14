@@ -836,7 +836,7 @@ const CB_COLS = [
   {k:'最高得標價格(元)',             lab:'最高得標',    t:'num'},
   {k:'得標加權平均價格(元)',         lab:'得標均價',    t:'num'},
   {k:'實際承銷價格(元)',             lab:'承銷價',      t:'num'},
-  {k:'TCRI',                        lab:'TCRI',        t:'num',
+  {k:'TCRI',                        lab:'TCRI',        t:'num',  decimals:0,
    calc: r => { const c = String(r['證券代號']).substring(0,4); const v = TCRI_MAP[c]; return v !== undefined ? v : NaN; }},
   {k:'發行時轉換價',                 lab:'發行轉換價',  t:'num'},
   {k:'投標結束日收盤價',             lab:'結束日收盤',  t:'num',  cmp:true},
