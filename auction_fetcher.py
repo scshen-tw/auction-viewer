@@ -675,6 +675,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', '微軟正黑體', Arial, sans-serif; font-size: 13px; background: #eef1f5; color: #222; }
+body.col-resizing { cursor: col-resize; user-select: none; }
 
 /* ── Header ─────────────────── */
 .hdr { background: #1a365d; color: #fff; padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; }
@@ -708,9 +709,13 @@ body { font-family: 'Segoe UI', '微軟正黑體', Arial, sans-serif; font-size:
 table { width: 100%; border-collapse: collapse; background: #fff; }
 thead { position: sticky; top: 0; z-index: 10; }
 thead tr:first-child { background: #243b5e; color: #fff; }
-th { padding: 8px 10px; text-align: left; white-space: nowrap; cursor: pointer;
-     user-select: none; font-weight: 500; font-size: 12px; border-right: 1px solid #2d4c72; }
+th { position: relative; padding: 8px 10px; text-align: left; white-space: nowrap; cursor: pointer;
+     user-select: none; font-weight: 500; font-size: 12px; border-right: 1px solid #2d4c72; overflow: hidden; }
 th:hover { background: #2d5a8e; }
+.resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 6px;
+           cursor: col-resize; z-index: 2; border-right: 2px solid transparent; }
+.resizer:hover { border-right-color: rgba(255,255,255,0.6); }
+.col-resizing .resizer.active { border-right-color: #7eb8f7; }
 th:last-child { border-right: none; }
 th .si { margin-left: 5px; opacity: .5; font-size: 10px; }
 th.asc  .si::after { content: '▲'; opacity: 1; }
@@ -1064,6 +1069,65 @@ function applyFontSize(sz) {
 function changeFontSize(delta) { applyFontSize(_fontSize + delta); }
 document.addEventListener('DOMContentLoaded', () => applyFontSize(_fontSize));
 
+// ── Column resize ─────────────────────────────────────────────────────────────
+let _colWidths = (() => { try { return JSON.parse(localStorage.getItem('colWidths') || '{}'); } catch(e) { return {}; } })();
+let _rz = null;
+
+function initResizers() {
+  const widths = _colWidths[tab] || {};
+  const tbl    = document.querySelector('table');
+  const hasW   = Object.keys(widths).length > 0;
+  tbl.style.tableLayout = hasW ? 'fixed' : '';
+  document.querySelectorAll('#thead tr:first-child th').forEach(th => {
+    const w = widths[th.dataset.colKey];
+    if (w) { th.style.width = w + 'px'; th.style.minWidth = w + 'px'; }
+    else   { th.style.width = ''; th.style.minWidth = ''; }
+  });
+}
+
+function onRzDown(e, el) {
+  e.preventDefault(); e.stopPropagation();
+  const th = el.closest('th');
+  _rz = { th, el, startX: e.clientX, startW: th.offsetWidth };
+  el.classList.add('active');
+  document.body.classList.add('col-resizing');
+  document.addEventListener('mousemove', onRzMove);
+  document.addEventListener('mouseup',   onRzUp);
+}
+
+function onRzMove(e) {
+  if (!_rz) return;
+  const w = Math.max(36, _rz.startW + e.clientX - _rz.startX);
+  _rz.th.style.width    = w + 'px';
+  _rz.th.style.minWidth = w + 'px';
+  document.querySelector('table').style.tableLayout = 'fixed';
+}
+
+function onRzUp() {
+  if (!_rz) return;
+  const key = _rz.th.dataset.colKey;
+  if (key) {
+    if (!_colWidths[tab]) _colWidths[tab] = {};
+    _colWidths[tab][key] = _rz.th.offsetWidth;
+    localStorage.setItem('colWidths', JSON.stringify(_colWidths));
+  }
+  _rz.el.classList.remove('active');
+  document.body.classList.remove('col-resizing');
+  _rz = null;
+  document.removeEventListener('mousemove', onRzMove);
+  document.removeEventListener('mouseup',   onRzUp);
+}
+
+function onRzDblClick(e, el) {
+  e.stopPropagation();
+  const key = el.closest('th').dataset.colKey;
+  if (!key || !_colWidths[tab]) return;
+  delete _colWidths[tab][key];
+  if (Object.keys(_colWidths[tab]).length === 0) delete _colWidths[tab];
+  localStorage.setItem('colWidths', JSON.stringify(_colWidths));
+  initResizers();
+}
+
 async function doRefresh() {
   const btn = document.getElementById('btn-refresh');
 
@@ -1308,7 +1372,8 @@ function render() {
   const headerRow = '<tr>' + cols.map(c => {
     const active = c.k === sortKey;
     const cls    = active ? (sortDir === 1 ? 'asc' : 'desc') : '';
-    return `<th class="${cls}" onclick="sortBy('${c.k}')">${c.lab}<span class="si"></span></th>`;
+    const safeK = c.k.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    return `<th class="${cls}" data-col-key="${safeK}" onclick="sortBy('${c.k}')">${c.lab}<span class="si"></span><div class="resizer" onmousedown="onRzDown(event,this)" ondblclick="onRzDblClick(event,this)"></div></th>`;
   }).join('') + '</tr>';
 
   // ── Filter row ──
@@ -1336,6 +1401,7 @@ function render() {
   }).join('') + '</tr>';
 
   document.getElementById('thead').innerHTML = headerRow + filterRow;
+  initResizers();
 
   // Restore focus & cursor to the filter input that was active before rebuild
   if (focusedKey) {
