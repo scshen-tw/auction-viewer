@@ -162,7 +162,13 @@ def _needs_result_update(row: pd.Series) -> bool:
         if not _is_empty(cancel):
             return False
         qty = str(row.get('合格投標數量(張)', '0')).strip().replace(',', '')
-        return qty in ('0', '', 'nan', 'None')
+        if qty in ('0', '', 'nan', 'None'):
+            return True  # no results at all yet
+        # has results but 承銷價 still missing → also needs update
+        ask = str(row.get('實際承銷價格(元)', '0')).strip().replace(',', '')
+        if ask in ('0', '', 'nan', 'None'):
+            return True
+        return False
     except Exception:
         return False
 
@@ -691,6 +697,11 @@ td.bold { font-weight: 600; }
             background: #fff; font: inherit; font-size: 13px; transition: .15s; }
 #btn-cols:hover { background: #e0f0ff; border-color: #1a365d; color: #1a365d; }
 #btn-cols.active { background: #1a365d; color: #fff; border-color: #1a365d; }
+.font-ctrl { display: inline-flex; align-items: center; gap: 3px; }
+.font-ctrl button { padding: 4px 8px; border: 1px solid #bbb; border-radius: 4px; cursor: pointer;
+                    background: #fff; font: inherit; font-size: 12px; transition: .15s; }
+.font-ctrl button:hover { background: #e0f0ff; border-color: #1a365d; color: #1a365d; }
+.font-ctrl #font-label { font-size: 11px; color: #666; min-width: 30px; text-align: center; }
 
 #col-panel { display: none; position: absolute; top: 100%; left: 0; right: 0;
              background: #fff; border-bottom: 2px solid #1a365d; padding: 10px 20px;
@@ -726,6 +737,11 @@ td.bold { font-weight: 600; }
     <span class="spin">↻</span> 更新
   </button>
   <button id="btn-cols" onclick="toggleColPanel()" title="欄位顯示 / 排序">⚙ 欄位</button>
+  <div class="font-ctrl" title="字體大小">
+    <button onclick="changeFontSize(-1)">A−</button>
+    <span id="font-label">13px</span>
+    <button onclick="changeFontSize(+1)">A+</button>
+  </div>
   <span id="toast" class="toast"></span>
   <div class="legend">
     <span><span class="dot dot-done"></span>已開標</span>
@@ -957,6 +973,16 @@ function _startPolling(btn) {
     }
   }, 2000);
 }
+
+let _fontSize = parseInt(localStorage.getItem('fontSize') || '13');
+function applyFontSize(sz) {
+  _fontSize = Math.min(20, Math.max(10, sz));
+  document.body.style.fontSize = _fontSize + 'px';
+  document.getElementById('font-label').textContent = _fontSize + 'px';
+  localStorage.setItem('fontSize', _fontSize);
+}
+function changeFontSize(delta) { applyFontSize(_fontSize + delta); }
+document.addEventListener('DOMContentLoaded', () => applyFontSize(_fontSize));
 
 async function doRefresh() {
   const btn = document.getElementById('btn-refresh');
