@@ -1067,9 +1067,15 @@ td.bold { font-weight: 700; }
       <div class="fg"><label>截止日</label>
         <input type="date" id="cb-date-from"> ~ <input type="date" id="cb-date-to">
       </div>
-      <div class="fg"><label>TCRI ≤</label>
-        <select id="cb-tcri">
-          <option value="">全部</option>
+      <div class="fg"><label>TCRI</label>
+        <select id="cb-tcri-min" style="width:55px">
+          <option value="">min</option>
+          <option>1</option><option>2</option><option>3</option><option>4</option>
+          <option>5</option><option>6</option><option>7</option>
+        </select>
+        ~
+        <select id="cb-tcri-max" style="width:55px">
+          <option value="">max</option>
           <option>1</option><option>2</option><option>3</option><option>4</option>
           <option>5</option><option>6</option><option>7</option>
         </select>
@@ -1837,7 +1843,8 @@ function closeChart() {
 function renderCbChart() {
   const dateFrom = document.getElementById('cb-date-from').value;
   const dateTo   = document.getElementById('cb-date-to').value;
-  const tcriMax  = document.getElementById('cb-tcri').value;
+  const tcriMin  = document.getElementById('cb-tcri-min').value;
+  const tcriMax  = document.getElementById('cb-tcri-max').value;
   const volMin   = parseFloat(document.getElementById('cb-vol-min').value) || 0;
   const parMin   = parseFloat(document.getElementById('cb-parity-min').value);
   const parMax   = parseFloat(document.getElementById('cb-parity-max').value);
@@ -1858,6 +1865,7 @@ function renderCbChart() {
 
     const code4 = String(r['證券代號']).substring(0, 4);
     const tcri  = TCRI_MAP[code4];
+    if (tcriMin !== '' && (tcri === undefined || tcri < parseInt(tcriMin))) continue;
     if (tcriMax !== '' && (tcri === undefined || tcri > parseInt(tcriMax))) continue;
 
     const vol = nv(r['競拍數量(張)']);
