@@ -1034,6 +1034,15 @@ td.bold { font-weight: 700; }
   </button>
   <button id="btn-cols" onclick="toggleColPanel()" title="欄位顯示 / 排序">⚙ 欄位</button>
   <button id="btn-chart" onclick="openChart()" title="散點圖分析">◈ 圖表</button>
+  <div id="rel-n-ctrl" class="font-ctrl" title="相對大盤漲跌期間" style="display:none;">
+    <label style="font-size:11px;color:#888;margin-right:3px;">相對大盤</label>
+    <select id="sel-rel-n" onchange="_relN=+this.value;render();"
+      style="background:#111;color:#FF6600;border:1px solid #444;font:inherit;font-size:12px;padding:1px 3px;">
+      <option value="5">5d</option>
+      <option value="10">10d</option>
+      <option value="20">20d</option>
+    </select>
+  </div>
   <div class="font-ctrl" title="字體大小">
     <button onclick="changeFontSize(-1)">A−</button>
     <span id="font-label">13px</span>
@@ -1130,6 +1139,8 @@ const RAW = {
 };
 const TCRI_MAP = __TCRI_MAP__;
 
+let _relN = 5;
+
 const STOCK_COLS = [
   {k:'開標日期',                    lab:'開標日期',    t:'date'},
   {k:'證券代號',                    lab:'代號',        t:'str',  cls:'mono'},
@@ -1146,8 +1157,10 @@ const STOCK_COLS = [
   {k:'得標加權平均價格(元)',         lab:'得標均價',    t:'num'},
   {k:'實際承銷價格(元)',             lab:'承銷價',      t:'num'},
   {k:'投標結束日收盤價',             lab:'結束日收盤',  t:'num',  cmp:true},
-  {k:'得標折價率',                   lab:'得標折價率%', t:'num',  decimals:1,
+  {k:'得標折價率',                   lab:'得標折價率%', t:'num',  decimals:2,
    calc: r => { const l=nv(r['最低得標價格(元)']), c=nv(r['投標結束日收盤價']); return (c>0&&!isNaN(l))?l/c*100:NaN; }},
+  {k:'相對大盤漲跌',                 lab:'相對大盤漲跌%',t:'num', decimals:2,
+   calc: r => { const v=r[`相對大盤漲跌_${_relN}d`]; return (v!=null&&v!=='')?parseFloat(v):NaN; }},
   {k:'取消競價拍賣(流標或取消)',      lab:'取消/流標',  t:'str'},
 ];
 
@@ -1569,6 +1582,7 @@ function switchTab(t) {
     b.classList.toggle('active', (t==='stocks') === (i===0)));
   const panel = document.getElementById('col-panel');
   if (panel && panel.classList.contains('open')) _buildColPanel();
+  document.getElementById('rel-n-ctrl').style.display = (t === 'stocks') ? '' : 'none';
   render();
 }
 
@@ -1886,9 +1900,9 @@ function renderStkChart() {
     if (dateTo   && d > dateTo)   continue;
 
     const close  = nv(r['投標結束日收盤價']);
-    const avgBid = nv(r['得標加權平均價格(元)']);
-    if (isNaN(close) || isNaN(avgBid) || close <= 0) continue;
-    const discount = (avgBid / close - 1) * 100;
+    const lowBid = nv(r['最低得標價格(元)']);
+    if (isNaN(close) || isNaN(lowBid) || close <= 0) continue;
+    const discount = lowBid / close * 100;
 
     const rel = r[relKey];
     if (rel == null || rel === '') continue;
@@ -1898,12 +1912,12 @@ function renderStkChart() {
     if (!isNaN(relMax) && relF > relMax) continue;
 
     points.push({ x: parseFloat(relF.toFixed(2)), y: parseFloat(discount.toFixed(2)),
-                  _label: `${r['證券名稱']} (${r['證券代號']})\n相對大盤(${ndays}d): ${relF.toFixed(2)}%  折價: ${discount.toFixed(2)}%\n截止: ${r['投標結束日']}` });
+                  _label: `${r['證券名稱']} (${r['證券代號']})\n相對大盤(${ndays}d): ${relF.toFixed(2)}%  得標折價率: ${discount.toFixed(2)}%\n截止: ${r['投標結束日']}` });
   }
 
   const opts = JSON.parse(JSON.stringify(CHART_OPTS));
   opts.scales.x.title.text = `截拍前相對大盤漲跌% (${ndays} 個交易日)`;
-  opts.scales.y.title.text = '得標均價折價率 (%)';
+  opts.scales.y.title.text = '得標折價率% (最低得標/收盤×100)';
   opts.plugins.tooltip.callbacks.label = ctx => ctx.raw._label.split('\n');
 
   const canvas = document.getElementById('canvas-stk');
