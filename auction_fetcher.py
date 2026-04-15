@@ -208,6 +208,9 @@ def merge_results(exist_df: pd.DataFrame, fresh_df: pd.DataFrame) -> tuple[pd.Da
 PRICE_CACHE_FILE = os.path.join(BASE_DIR, 'price_cache.json')
 _price_cache: dict[str, dict[str, float]] = {}
 
+TAIEX_JSON = os.path.join(BASE_DIR, 'taiex_cache.json')
+_taiex_cache: dict[str, float] = {}   # {'YYYY-MM-DD': close_float}
+
 def _load_price_cache() -> None:
     global _price_cache
     if os.path.exists(PRICE_CACHE_FILE):
@@ -220,6 +223,84 @@ def _load_price_cache() -> None:
 def _save_price_cache() -> None:
     with open(PRICE_CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(_price_cache, f, ensure_ascii=False)
+
+# ── TAIEX cache ───────────────────────────────────────────────────────────────
+
+def _load_taiex_cache() -> None:
+    global _taiex_cache
+    if os.path.exists(TAIEX_JSON):
+        try:
+            _taiex_cache = json.load(open(TAIEX_JSON, encoding='utf-8'))
+        except Exception:
+            _taiex_cache = {}
+
+def _save_taiex_cache() -> None:
+    with open(TAIEX_JSON, 'w', encoding='utf-8') as f:
+        json.dump(_taiex_cache, f, ensure_ascii=False)
+
+def download_taiex_history() -> None:
+    """一次性抓取 2016~今日的 TAIEX 收盤價，存入 taiex_cache.json。"""
+    global _taiex_cache
+    log.info('下載 TAIEX 歷史資料 (2016~今日)…')
+    start = f'{START_YEAR_AD}-01-01'
+    end   = datetime.now().strftime('%Y-%m-%d')
+    r = requests.get('https://api.finmindtrade.com/api/v4/data', params={
+        'dataset': 'TaiwanStockPrice',
+        'data_id': 'TAIEX',
+        'start_date': start,
+        'end_date': end,
+        'token': FINMIND_TOKEN,
+    }, timeout=30)
+    for row in r.json().get('data', []):
+        _taiex_cache[row['date']] = float(row['close'])
+    _save_taiex_cache()
+    log.info(f'TAIEX 已快取 {len(_taiex_cache)} 個交易日')
+
+def update_taiex_cache() -> None:
+    """增量更新：只補抓最近 60 天的 TAIEX。"""
+    global _taiex_cache
+    _load_taiex_cache()
+    start = (datetime.now() - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+    end   = datetime.now().strftime('%Y-%m-%d')
+    r = requests.get('https://api.finmindtrade.com/api/v4/data', params={
+        'dataset': 'TaiwanStockPrice',
+        'data_id': 'TAIEX',
+        'start_date': start,
+        'end_date': end,
+        'token': FINMIND_TOKEN,
+    }, timeout=30)
+    added = 0
+    for row in r.json().get('data', []):
+        key = row['date']
+        if key not in _taiex_cache:
+            added += 1
+        _taiex_cache[key] = float(row['close'])
+    _save_taiex_cache()
+    if added:
+        log.info(f'TAIEX 更新 {added} 筆')
+
+def _taiex_trading_dates() -> list[str]:
+    return sorted(_taiex_cache.keys())
+
+def _date_n_trading_days_before(date_str: str, n: int) -> str | None:
+    """回傳 TAIEX 交易日曆中 date_str 往前 n 個交易日的日期。
+    date_str 格式 YYYY-MM-DD；若找不到回傳 None。"""
+    dates = _taiex_trading_dates()
+    if not dates:
+        return None
+    # 找到 date_str 的位置（若不在交易日取最近前一個）
+    idx = None
+    for i, d in enumerate(dates):
+        if d == date_str:
+            idx = i
+            break
+        if d > date_str:
+            idx = i - 1
+            break
+    if idx is None:
+        idx = len(dates) - 1
+    target = idx - n
+    return dates[target] if target >= 0 else None
 
 def _cache_lookup(code: str, date_key: str):
     day = _price_cache.get(date_key, {})
@@ -419,15 +500,51 @@ def _p(val) -> str | None:
     """Convert a price float/None to str for DataFrame storage."""
     return str(val) if val is not None else None
 
+def _calc_rel_perf(closing_date_tw: str, code: str, market: str,
+                   close_price_str, n: int) -> float | None:
+    """計算個股相對大盤漲跌%（n 個交易日）。
+    closing_date_tw: '2026/04/14' 格式；close_price_str: 截止日收盤價字串。
+    回傳 (股票n日報酬 - 大盤n日報酬)，四捨五入兩位，找不到資料回傳 None。"""
+    if not close_price_str:
+        return None
+    try:
+        close_now = float(close_price_str)
+    except (ValueError, TypeError):
+        return None
+    date_ymd = closing_date_tw.replace('/', '-')          # YYYY-MM-DD
+    before_date = _date_n_trading_days_before(date_ymd, n)
+    if not before_date:
+        return None
+    taiex_now    = _taiex_cache.get(date_ymd)
+    taiex_before = _taiex_cache.get(before_date)
+    if not taiex_now or not taiex_before:
+        return None
+    before_price = get_closing_price(code, before_date.replace('-', '/'), market)
+    if not before_price:
+        return None
+    stock_ret  = (close_now / float(before_price) - 1) * 100
+    taiex_ret  = (taiex_now / taiex_before - 1) * 100
+    return round(stock_ret - taiex_ret, 2)
+
 def enrich_stocks(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df['投標結束日收盤價'] = pd.array([None] * len(df), dtype=object)
+    df['投標結束日收盤價']  = pd.array([None] * len(df), dtype=object)
+    df['相對大盤漲跌_5d']  = pd.array([None] * len(df), dtype=object)
+    df['相對大盤漲跌_10d'] = pd.array([None] * len(df), dtype=object)
+    df['相對大盤漲跌_20d'] = pd.array([None] * len(df), dtype=object)
     total = len(df)
     for i, (idx, row) in enumerate(df.iterrows()):
-        df.at[idx, '投標結束日收盤價'] = _p(get_closing_price(
-            row['證券代號'], row['投標結束日'], row['發行市場']))
+        close = get_closing_price(row['證券代號'], row['投標結束日'], row['發行市場'])
+        df.at[idx, '投標結束日收盤價'] = _p(close)
+        close_str = _p(close)
+        date_tw   = row['投標結束日']
+        code      = row['證券代號']
+        market    = row['發行市場']
+        for n, col in [(5, '相對大盤漲跌_5d'), (10, '相對大盤漲跌_10d'), (20, '相對大盤漲跌_20d')]:
+            val = _calc_rel_perf(date_tw, code, market, close_str, n)
+            df.at[idx, col] = val
         if (i + 1) % 20 == 0 or (i + 1) == total:
-            log.info(f'    股票收盤價: {i+1}/{total}')
+            log.info(f'    股票收盤價+相對大盤: {i+1}/{total}')
     return df
 
 def enrich_cbs(df: pd.DataFrame) -> pd.DataFrame:
@@ -545,6 +662,7 @@ def generate_html(stocks: pd.DataFrame, cbs: pd.DataFrame) -> None:
 def download_history() -> None:
     log.info('=== 全量下載 (2016~現在) ===')
     _load_price_cache()
+    download_taiex_history()
     log.info('下載今日全市場收盤價…')
     download_today_prices()
     all_dfs = []
@@ -569,6 +687,7 @@ def update_data() -> None:
     _tpex_cb_cache = None   # 每次更新強制重抓最新轉換價表
     log.info('=== 增量更新 ===')
     _load_price_cache()
+    update_taiex_cache()
     log.info('下載今日全市場收盤價 (OpenAPI)…')
     today_date = download_today_prices()
     if today_date:
@@ -868,7 +987,34 @@ td.bold { font-weight: 700; }
 .col-item input[type=checkbox] { cursor: pointer; width: 14px; height: 14px; }
 .col-item label { cursor: pointer; }
 .col-panel-hint { font-size: 11px; color: #555555; align-self: center; margin-left: auto; }
+
+/* ── Chart modal ─────────────────── */
+#btn-chart { padding: 5px 13px; border: 1px solid #444444; border-radius: 0; cursor: pointer;
+             background: #111111; font: inherit; font-size: 13px; transition: .15s; color: #AAAAAA; }
+#btn-chart:hover { background: #1A1A1A; border-color: #FF6600; color: #FF6600; }
+#btn-chart.active { background: #FF6600; color: #000000; border-color: #FF6600; font-weight: 700; }
+.chart-modal { display: none; position: fixed; inset: 0; background: #000000;
+               z-index: 200; flex-direction: column; }
+.chart-modal.open { display: flex; }
+.chart-modal-hdr { background: #0A0A0A; border-bottom: 2px solid #FF6600;
+                   padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.chart-modal-hdr h2 { font-size: 14px; color: #FF6600; font-weight: 700; white-space: nowrap; margin-right: 8px; }
+.chart-modal-body { flex: 1; padding: 16px; overflow: auto; display: flex; flex-direction: column; }
+.chart-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+                 margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #333; }
+.chart-filters label { font-size: 11px; color: #888; }
+.chart-filters input, .chart-filters select {
+  background: #0D0D0D; color: #C8C8C8; border: 1px solid #444; border-radius: 0;
+  padding: 3px 6px; font: inherit; font-size: 12px; outline: none; }
+.chart-filters input:focus, .chart-filters select:focus { border-color: #FF6600; }
+.chart-filters .fg { display: flex; align-items: center; gap: 4px; }
+.chart-canvas-wrap { flex: 1; min-height: 400px; position: relative; }
+.chart-close { margin-left: auto; padding: 4px 10px; border: 1px solid #666; border-radius: 0;
+               background: transparent; color: #AAAAAA; cursor: pointer; font: inherit; font-size: 13px; }
+.chart-close:hover { border-color: #FF6600; color: #FF6600; }
+.chart-legend { font-size: 11px; color: #888; padding-top: 8px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -887,6 +1033,7 @@ td.bold { font-weight: 700; }
     <span class="spin">↻</span> 更新
   </button>
   <button id="btn-cols" onclick="toggleColPanel()" title="欄位顯示 / 排序">⚙ 欄位</button>
+  <button id="btn-chart" onclick="openChart()" title="散點圖分析">◈ 圖表</button>
   <div class="font-ctrl" title="字體大小">
     <button onclick="changeFontSize(-1)">A−</button>
     <span id="font-label">13px</span>
@@ -901,6 +1048,71 @@ td.bold { font-weight: 700; }
   </div>
   <span class="stat-badge" id="stat"></span>
   <div id="col-panel"></div>
+</div>
+
+<!-- CB 散點圖 modal -->
+<div id="modal-cb" class="chart-modal">
+  <div class="chart-modal-hdr">
+    <h2>◈ CB競拍 — 最低標溢價率分佈</h2>
+    <div class="chart-filters">
+      <div class="fg"><label>截止日</label>
+        <input type="date" id="cb-date-from"> ~ <input type="date" id="cb-date-to">
+      </div>
+      <div class="fg"><label>TCRI ≤</label>
+        <select id="cb-tcri">
+          <option value="">全部</option>
+          <option>1</option><option>2</option><option>3</option><option>4</option>
+          <option>5</option><option>6</option><option>7</option>
+        </select>
+      </div>
+      <div class="fg"><label>競拍量(張) ≥</label>
+        <input type="number" id="cb-vol-min" style="width:80px" placeholder="0">
+      </div>
+      <div class="fg"><label>Parity%</label>
+        <input type="number" id="cb-parity-min" style="width:60px" placeholder="min">
+        ~
+        <input type="number" id="cb-parity-max" style="width:60px" placeholder="max">
+      </div>
+      <button onclick="renderCbChart()" style="padding:3px 10px;border:1px solid #FF6600;
+        background:#1A0D00;color:#FF6600;cursor:pointer;font:inherit;border-radius:0;">套用</button>
+    </div>
+    <button class="chart-close" onclick="closeChart()">✕ 關閉</button>
+  </div>
+  <div class="chart-modal-body">
+    <div class="chart-canvas-wrap"><canvas id="canvas-cb"></canvas></div>
+    <div class="chart-legend" id="cb-legend"></div>
+  </div>
+</div>
+
+<!-- 股票散點圖 modal -->
+<div id="modal-stk" class="chart-modal">
+  <div class="chart-modal-hdr">
+    <h2>◈ 股票競拍 — 截拍前相對大盤 vs 得標折價率</h2>
+    <div class="chart-filters">
+      <div class="fg"><label>截止日</label>
+        <input type="date" id="stk-date-from"> ~ <input type="date" id="stk-date-to">
+      </div>
+      <div class="fg"><label>相對大盤期間</label>
+        <select id="stk-ndays">
+          <option value="5">5 個交易日</option>
+          <option value="10">10 個交易日</option>
+          <option value="20">20 個交易日</option>
+        </select>
+      </div>
+      <div class="fg"><label>相對大盤% 範圍</label>
+        <input type="number" id="stk-rel-min" style="width:65px" placeholder="min">
+        ~
+        <input type="number" id="stk-rel-max" style="width:65px" placeholder="max">
+      </div>
+      <button onclick="renderStkChart()" style="padding:3px 10px;border:1px solid #FF6600;
+        background:#1A0D00;color:#FF6600;cursor:pointer;font:inherit;border-radius:0;">套用</button>
+    </div>
+    <button class="chart-close" onclick="closeChart()">✕ 關閉</button>
+  </div>
+  <div class="chart-modal-body">
+    <div class="chart-canvas-wrap"><canvas id="canvas-stk"></canvas></div>
+    <div class="chart-legend" id="stk-legend"></div>
+  </div>
 </div>
 
 <div class="tbl-wrap">
@@ -1562,6 +1774,148 @@ window.addEventListener('DOMContentLoaded', async () => {
     _startPolling(btn);
   }
 });
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+let _cbChart = null, _stkChart = null;
+
+const CHART_OPTS = {
+  responsive: true, maintainAspectRatio: false,
+  animation: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      backgroundColor: '#1A1A1A', borderColor: '#FF6600', borderWidth: 1,
+      titleColor: '#FF6600', bodyColor: '#C8C8C8',
+      callbacks: { label: ctx => ctx.raw._label }
+    }
+  },
+  scales: {
+    x: { grid: { color: '#222' }, ticks: { color: '#888' },
+         title: { display: true, color: '#FF6600', font: { size: 12 } } },
+    y: { grid: { color: '#222' }, ticks: { color: '#888' },
+         title: { display: true, color: '#FF6600', font: { size: 12 } } }
+  }
+};
+
+function _parseDate(s) {
+  if (!s) return null;
+  return s.replace(/\//g, '-');   // YYYY-MM-DD
+}
+
+function openChart() {
+  const btn = document.getElementById('btn-chart');
+  btn.classList.add('active');
+  if (tab === 'cbs') {
+    document.getElementById('modal-cb').classList.add('open');
+    renderCbChart();
+  } else {
+    document.getElementById('modal-stk').classList.add('open');
+    renderStkChart();
+  }
+}
+
+function closeChart() {
+  document.getElementById('modal-cb').classList.remove('open');
+  document.getElementById('modal-stk').classList.remove('open');
+  document.getElementById('btn-chart').classList.remove('active');
+}
+
+function renderCbChart() {
+  const dateFrom = document.getElementById('cb-date-from').value;
+  const dateTo   = document.getElementById('cb-date-to').value;
+  const tcriMax  = document.getElementById('cb-tcri').value;
+  const volMin   = parseFloat(document.getElementById('cb-vol-min').value) || 0;
+  const parMin   = parseFloat(document.getElementById('cb-parity-min').value);
+  const parMax   = parseFloat(document.getElementById('cb-parity-max').value);
+
+  const points = [];
+  for (const r of RAW.cbs) {
+    const d = _parseDate(r['投標結束日']);
+    if (dateFrom && d < dateFrom) continue;
+    if (dateTo   && d > dateTo)   continue;
+
+    const close = nv(r['投標結束日收盤價']);
+    const conv  = nv(r['發行時轉換價']);
+    if (isNaN(close) || isNaN(conv) || conv <= 0) continue;
+    const parity  = close / conv * 100;
+    const lowBid  = nv(r['最低得標價格(元)']);
+    if (isNaN(lowBid) || parity <= 0) continue;
+    const premium = (lowBid / parity - 1) * 100;
+
+    const code4 = String(r['證券代號']).substring(0, 4);
+    const tcri  = TCRI_MAP[code4];
+    if (tcriMax !== '' && (tcri === undefined || tcri > parseInt(tcriMax))) continue;
+
+    const vol = nv(r['競拍數量(張)']);
+    if (vol < volMin) continue;
+    if (!isNaN(parMin) && parity < parMin) continue;
+    if (!isNaN(parMax) && parity > parMax) continue;
+
+    points.push({ x: parseFloat(parity.toFixed(2)), y: parseFloat(premium.toFixed(2)),
+                  _label: `${r['證券名稱']} (${r['證券代號']})\nParity: ${parity.toFixed(1)}%  溢價: ${premium.toFixed(1)}%\n截止: ${r['投標結束日']}` });
+  }
+
+  const opts = JSON.parse(JSON.stringify(CHART_OPTS));
+  opts.scales.x.title.text = '截拍日 Parity (%)';
+  opts.scales.y.title.text = '最低標溢價率 (%)';
+  opts.plugins.tooltip.callbacks.label = ctx => ctx.raw._label.split('\n');
+
+  const canvas = document.getElementById('canvas-cb');
+  if (_cbChart) _cbChart.destroy();
+  _cbChart = new Chart(canvas, {
+    type: 'scatter',
+    data: { datasets: [{ data: points, backgroundColor: '#FF660088', pointRadius: 5,
+                          pointHoverRadius: 8, pointHoverBackgroundColor: '#FF6600' }] },
+    options: opts
+  });
+  document.getElementById('cb-legend').textContent = `顯示 ${points.length} 筆（僅含結標且有收盤價資料）`;
+}
+
+function renderStkChart() {
+  const dateFrom = document.getElementById('stk-date-from').value;
+  const dateTo   = document.getElementById('stk-date-to').value;
+  const ndays    = document.getElementById('stk-ndays').value;   // '5','10','20'
+  const relMin   = parseFloat(document.getElementById('stk-rel-min').value);
+  const relMax   = parseFloat(document.getElementById('stk-rel-max').value);
+  const relKey   = `相對大盤漲跌_${ndays}d`;
+
+  const points = [];
+  for (const r of RAW.stocks) {
+    const d = _parseDate(r['投標結束日']);
+    if (dateFrom && d < dateFrom) continue;
+    if (dateTo   && d > dateTo)   continue;
+
+    const close  = nv(r['投標結束日收盤價']);
+    const avgBid = nv(r['得標加權平均價格(元)']);
+    if (isNaN(close) || isNaN(avgBid) || close <= 0) continue;
+    const discount = (avgBid / close - 1) * 100;
+
+    const rel = r[relKey];
+    if (rel == null || rel === '') continue;
+    const relF = parseFloat(rel);
+    if (isNaN(relF)) continue;
+    if (!isNaN(relMin) && relF < relMin) continue;
+    if (!isNaN(relMax) && relF > relMax) continue;
+
+    points.push({ x: parseFloat(relF.toFixed(2)), y: parseFloat(discount.toFixed(2)),
+                  _label: `${r['證券名稱']} (${r['證券代號']})\n相對大盤(${ndays}d): ${relF.toFixed(2)}%  折價: ${discount.toFixed(2)}%\n截止: ${r['投標結束日']}` });
+  }
+
+  const opts = JSON.parse(JSON.stringify(CHART_OPTS));
+  opts.scales.x.title.text = `截拍前相對大盤漲跌% (${ndays} 個交易日)`;
+  opts.scales.y.title.text = '得標均價折價率 (%)';
+  opts.plugins.tooltip.callbacks.label = ctx => ctx.raw._label.split('\n');
+
+  const canvas = document.getElementById('canvas-stk');
+  if (_stkChart) _stkChart.destroy();
+  _stkChart = new Chart(canvas, {
+    type: 'scatter',
+    data: { datasets: [{ data: points, backgroundColor: '#00CC4488', pointRadius: 5,
+                          pointHoverRadius: 8, pointHoverBackgroundColor: '#00CC44' }] },
+    options: opts
+  });
+  document.getElementById('stk-legend').textContent = `顯示 ${points.length} 筆（僅含結標且有收盤價及相對大盤資料）`;
+}
 </script>
 </body>
 </html>"""
@@ -1571,6 +1925,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 if __name__ == '__main__':
     if '--html' in sys.argv:
         _load_price_cache()
+        _load_taiex_cache()
         stocks, cbs = load_data()
         if stocks.empty:
             log.error('無資料，請先執行全量下載')
