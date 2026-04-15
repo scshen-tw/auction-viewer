@@ -302,6 +302,86 @@ def _date_n_trading_days_before(date_str: str, n: int) -> str | None:
     target = idx - n
     return dates[target] if target >= 0 else None
 
+# ── Historical Volatility cache ───────────────────────────────────────────────
+
+HVOL_JSON = os.path.join(BASE_DIR, 'hvol_cache.json')
+_hvol_cache: dict[str, float] = {}   # {'stock_code_YYYY-MM-DD': annualised_vol%}
+
+def _load_hvol_cache() -> None:
+    global _hvol_cache
+    if os.path.exists(HVOL_JSON):
+        try:
+            _hvol_cache = json.load(open(HVOL_JSON, encoding='utf-8'))
+        except Exception:
+            _hvol_cache = {}
+
+def _save_hvol_cache() -> None:
+    with open(HVOL_JSON, 'w', encoding='utf-8') as f:
+        json.dump(_hvol_cache, f, ensure_ascii=False)
+
+def _get_finmind_price_series(code: str, start_date: str, end_date: str) -> list[float]:
+    """Fetch a list of closing prices for `code` in [start_date, end_date] from FinMind.
+    Returns a list of floats in chronological order."""
+    if not FINMIND_TOKEN:
+        return []
+    try:
+        r = requests.get(
+            'https://api.finmindtrade.com/api/v4/data',
+            params={
+                'dataset':    'TaiwanStockPrice',
+                'data_id':    code,
+                'start_date': start_date,
+                'end_date':   end_date,
+                'token':      FINMIND_TOKEN,
+            },
+            timeout=30,
+        )
+        data = r.json().get('data', [])
+        if not data:
+            return []
+        return [float(row['close']) for row in sorted(data, key=lambda x: x['date'])
+                if row.get('close') not in (None, '', 0)]
+    except Exception as e:
+        log.warning(f'FinMind 歷史序列 {code} 失敗: {e}')
+        return []
+
+def get_hist_vol(stock_code: str, end_date_str: str, n: int = 30) -> float | None:
+    """計算 stock_code 在 end_date_str（含）往前 n 個交易日的年化歷史波動率（%）。
+    公式：std(ln(P_t/P_{t-1})) × √252 × 100
+    結果快取於 hvol_cache.json。
+    """
+    import math
+    stock_code = str(stock_code).strip()
+    if not stock_code or str(end_date_str).strip() in ('', 'nan', 'None'):
+        return None
+    try:
+        d_end = _parse_date(end_date_str)
+        end_key = d_end.strftime('%Y-%m-%d')
+    except Exception:
+        return None
+
+    cache_key = f'{stock_code}_{end_key}'
+    if cache_key in _hvol_cache:
+        return _hvol_cache[cache_key]
+
+    # Need n+1 prices to get n log-returns; fetch ~60 calendar days to cover weekends/holidays
+    d_start = d_end - pd.Timedelta(days=60)
+    start_key = d_start.strftime('%Y-%m-%d')
+    prices = _get_finmind_price_series(stock_code, start_key, end_key)
+    if len(prices) < n + 1:
+        return None   # 資料不足
+
+    # Take the last n+1 prices
+    prices = prices[-(n + 1):]
+    log_rets = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
+    mean = sum(log_rets) / len(log_rets)
+    variance = sum((r - mean) ** 2 for r in log_rets) / (len(log_rets) - 1)
+    hv = math.sqrt(variance) * math.sqrt(252) * 100
+    result = round(hv, 2)
+    _hvol_cache[cache_key] = result
+    _save_hvol_cache()
+    return result
+
 def _cache_lookup(code: str, date_key: str):
     day = _price_cache.get(date_key, {})
     p   = day.get(code)
@@ -551,11 +631,15 @@ def enrich_cbs(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['投標結束日收盤價'] = pd.array([None] * len(df), dtype=object)
     df['發行時轉換價']    = pd.array([None] * len(df), dtype=object)
+    df['歷史波動率30d']   = pd.array([None] * len(df), dtype=object)
     total = len(df)
     for i, (idx, row) in enumerate(df.iterrows()):
+        scode = cb_underlying_code(row['證券代號'])
         df.at[idx, '投標結束日收盤價'] = _p(get_closing_price(
-            cb_underlying_code(row['證券代號']), row['投標結束日'], row['發行市場']))
+            scode, row['投標結束日'], row['發行市場']))
         df.at[idx, '發行時轉換價'] = _p(get_cb_conversion_price(row['證券代號']))
+        hv = get_hist_vol(scode, row['投標結束日'])
+        df.at[idx, '歷史波動率30d'] = str(hv) if hv is not None else None
         time.sleep(0.3)
         if (i + 1) % 10 == 0 or (i + 1) == total:
             log.info(f'    CB: {i+1}/{total}')
@@ -662,6 +746,7 @@ def generate_html(stocks: pd.DataFrame, cbs: pd.DataFrame) -> None:
 def download_history() -> None:
     log.info('=== 全量下載 (2016~現在) ===')
     _load_price_cache()
+    _load_hvol_cache()
     download_taiex_history()
     log.info('下載今日全市場收盤價…')
     download_today_prices()
@@ -687,6 +772,7 @@ def update_data() -> None:
     _tpex_cb_cache = None   # 每次更新強制重抓最新轉換價表
     log.info('=== 增量更新 ===')
     _load_price_cache()
+    _load_hvol_cache()
     update_taiex_cache()
     log.info('下載今日全市場收盤價 (OpenAPI)…')
     today_date = download_today_prices()
@@ -800,6 +886,37 @@ def update_data() -> None:
     if not new_cbs.empty:
         new_cbs = backfill_conv_price(new_cbs)
 
+    # ── 5. Backfill missing CB 歷史波動率30d ──────────────────────────────────
+    def backfill_hvol(df):
+        if df.empty:
+            return df
+        if '歷史波動率30d' not in df.columns:
+            df['歷史波動率30d'] = None
+        mask = df['歷史波動率30d'].isna() | df['歷史波動率30d'].isin(['nan', 'None', ''])
+        # Only backfill rows that have a valid end date (i.e. result rows, not cancelled)
+        missing = df[mask & df['投標結束日'].notna() & ~df['投標結束日'].isin(['', 'nan', 'None'])]
+        if missing.empty:
+            return df
+        total = len(missing)
+        log.info(f'  補算歷史波動率 {total} 筆…')
+        filled = 0
+        for n, (idx, row) in enumerate(missing.iterrows(), 1):
+            scode = cb_underlying_code(row['證券代號'])
+            hv = get_hist_vol(scode, row['投標結束日'])
+            if hv is not None:
+                df.at[idx, '歷史波動率30d'] = str(hv)
+                filled += 1
+            if n % 50 == 0:
+                log.info(f'    進度 {n}/{total}，已填 {filled} 筆')
+                _save_hvol_cache()
+        _save_hvol_cache()
+        log.info(f'  歷史波動率補算完成：{filled}/{total} 筆')
+        return df
+
+    cbs_exist = backfill_hvol(cbs_exist)
+    if not new_cbs.empty:
+        new_cbs = backfill_hvol(new_cbs)
+
     stocks_all = pd.concat([stocks_exist, new_stocks], ignore_index=True)
     cbs_all    = pd.concat([cbs_exist,    new_cbs],    ignore_index=True)
     save_data(stocks_all, cbs_all)
@@ -813,7 +930,7 @@ def _git_push() -> None:
     import subprocess
     repo = BASE_DIR
     targets = ['auction_stocks.json', 'auction_cbs.json',
-               'price_cache.json',   'auction_viewer.html']
+               'price_cache.json',   'hvol_cache.json', 'auction_viewer.html']
     # Only stage files that actually exist and have changes
     changed = []
     for f in targets:
@@ -1193,6 +1310,7 @@ const CB_COLS = [
    calc: r => { const c=nv(r['投標結束日收盤價']), p=nv(r['發行時轉換價']); return (p>0&&!isNaN(c)&&!isNaN(p))?c/p*100:NaN; }},
   {k:'最低標溢價率',                 lab:'最低標溢價%', t:'num',  decimals:1,
    calc: r => { const l=nv(r['最低得標價格(元)']), c=nv(r['投標結束日收盤價']), p=nv(r['發行時轉換價']); const parity=(p>0&&!isNaN(c))?c/p*100:NaN; return (!isNaN(parity)&&parity>0&&!isNaN(l))?(l/parity-1)*100:NaN; }},
+  {k:'歷史波動率30d',                lab:'HV30%',      t:'num',  decimals:1},
   {k:'取消競價拍賣(流標或取消)',      lab:'取消/流標',  t:'str'},
 ];
 
@@ -1948,6 +2066,7 @@ if __name__ == '__main__':
     if '--html' in sys.argv:
         _load_price_cache()
         _load_taiex_cache()
+        _load_hvol_cache()
         stocks, cbs = load_data()
         if stocks.empty:
             log.error('無資料，請先執行全量下載')
