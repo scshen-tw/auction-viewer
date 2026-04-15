@@ -359,6 +359,9 @@ def get_hist_vol(stock_code: str, end_date_str: str, n: int = 30) -> float | Non
         end_key = d_end.strftime('%Y-%m-%d')
     except Exception:
         return None
+    # 投標結束日在今天之後，尚未截拍，不計算
+    if d_end.date() > date.today():
+        return None
 
     cache_key = f'{stock_code}_{end_key}'
     if cache_key in _hvol_cache:
