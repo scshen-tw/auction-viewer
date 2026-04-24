@@ -21,16 +21,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run incremental update
-        run: python auction_fetcher.py --update
-
-      - name: Regenerate HTML viewer
-        run: python auction_fetcher.py --html
-
-      - name: Commit and push updated files
+      - name: Configure git
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add auction_stocks.json auction_cbs.json auction_viewer.html
+
+      - name: Run incremental update
+        run: python auction_fetcher.py --update
+
+      - name: Commit remaining changes
+        run: |
+          git add auction_stocks.json auction_cbs.json price_cache.json auction_viewer.html
           git diff --staged --quiet && echo "No changes." || \
             git commit -m "chore: daily update $(date +'%Y-%m-%d')" && git push
