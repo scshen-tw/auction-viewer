@@ -1058,21 +1058,61 @@ def _git_push() -> bool:
     import subprocess
     repo = BASE_DIR
     targets = ['auction_stocks.json', 'auction_cbs.json',
-               'price_cache.json',   'hvol_cache.json', 'auction_viewer.html']
+               'price_cache.json',   'hvol_cache.json', 'taiex_cache.json',
+               'auction_viewer.html']
+
+    def run_git(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ['git'] + args,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+    def log_git_failure(label: str, result: subprocess.CompletedProcess) -> None:
+        output = '\n'.join(s for s in [result.stdout, result.stderr] if s)
+        log.error(f'Git: {label} 失敗，exit={result.returncode}\n{output}')
+
+    def push_once() -> bool:
+        result = run_git(['push'])
+        if result.returncode == 0:
+            log.info('Git: push 成功')
+            return True
+        log_git_failure('push', result)
+        return False
+
+    def recover_push_rejection() -> bool:
+        log.info('Git: 嘗試自動修復 push 失敗（fetch + rebase + retry）')
+        fetch = run_git(['fetch', 'origin'])
+        if fetch.returncode != 0:
+            log_git_failure('fetch origin', fetch)
+            return False
+
+        rebase = run_git(['rebase', '--autostash', 'origin/main'])
+        if rebase.returncode != 0:
+            log_git_failure('rebase origin/main', rebase)
+            abort = run_git(['rebase', '--abort'])
+            if abort.returncode == 0:
+                log.error('Git: rebase 已中止，保留本機 commit，請手動處理衝突後再 push')
+            else:
+                log_git_failure('rebase --abort', abort)
+            return False
+
+        log.info('Git: rebase 成功，重新 push')
+        return push_once()
+
     # Only stage files that actually exist and have changes
     changed = []
     for f in targets:
         path = os.path.join(repo, f)
         if not os.path.exists(path):
             continue
-        r = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', f],
-                           cwd=repo, capture_output=True)
+        r = run_git(['diff', '--quiet', 'HEAD', '--', f])
         if r.returncode != 0:   # non-zero = file has changes
             changed.append(f)
         else:
             # also check untracked
-            r2 = subprocess.run(['git', 'ls-files', '--error-unmatch', f],
-                                cwd=repo, capture_output=True)
+            r2 = run_git(['ls-files', '--error-unmatch', f])
             if r2.returncode != 0:
                 changed.append(f)
 
@@ -1091,13 +1131,9 @@ def _git_push() -> bool:
         log.error(f'Git: commit 前置作業失敗，exit={exc.returncode}')
         return False
 
-    result = subprocess.run(['git', 'push'], cwd=repo, capture_output=True, text=True)
-    if result.returncode == 0:
-        log.info('Git: push 成功')
+    if push_once():
         return True
-    else:
-        log.error(f'Git: push 失敗\n{result.stderr}')
-        return False
+    return recover_push_rejection()
 
 # ── HTML Template ─────────────────────────────────────────────────────────────
 
