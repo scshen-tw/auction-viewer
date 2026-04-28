@@ -549,14 +549,97 @@ def _load_tpex_cb_map() -> dict:
         log.warning(f'TPEX bond_ISSBD5_data 載入失敗: {e}')
     return _tpex_cb_cache
 
+_OUTLOOK_CODE_KEYS = ['CB代碼', '代號', '債代', '標的代號', '編號', '債券代號']
+_OUTLOOK_CONV_KEYS = ['轉換價', '轉換價格', '換股價']
+_outlook_cb_cache: dict | None = None  # {cb_code_str: float}
+
+def _load_outlook_cb_map() -> dict:
+    """從 Outlook cbas 資料夾最新一封主旨含「cb案件整理表」的郵件解析轉換價。"""
+    global _outlook_cb_cache
+    if _outlook_cb_cache is not None:
+        return _outlook_cb_cache
+    _outlook_cb_cache = {}
+    try:
+        import win32com.client
+        outlook = win32com.client.Dispatch('Outlook.Application').GetNamespace('MAPI')
+        cbas_folder = None
+        for account in outlook.Folders:
+            for folder in account.Folders:
+                if folder.Name.lower() == 'cbas':
+                    cbas_folder = folder
+                    break
+            if cbas_folder:
+                break
+        if cbas_folder is None:
+            log.debug('Outlook: 找不到 cbas 資料夾')
+            return _outlook_cb_cache
+        latest_mail, latest_time = None, None
+        for item in cbas_folder.Items:
+            try:
+                if '案件整理表' in item.Subject and (latest_time is None or item.ReceivedTime > latest_time):
+                    latest_mail, latest_time = item, item.ReceivedTime
+            except Exception:
+                continue
+        if latest_mail is None:
+            log.debug('Outlook: cbas 找不到「cb案件整理表」郵件')
+            return _outlook_cb_cache
+        soup = BeautifulSoup(latest_mail.HTMLBody, 'lxml')
+        table = soup.find('table')
+        if table is None:
+            log.debug('Outlook: 郵件中找不到表格')
+            return _outlook_cb_cache
+        rows = table.find_all('tr')
+        header_row = code_idx = conv_idx = None
+        for row in rows:
+            cells = row.find_all(['th', 'td'])
+            texts = [c.get_text(strip=True) for c in cells]
+            if any(k in t for k in _OUTLOOK_CODE_KEYS for t in texts):
+                header_row = row
+                for j, t in enumerate(texts):
+                    if code_idx is None and any(k in t for k in _OUTLOOK_CODE_KEYS):
+                        code_idx = j
+                    if conv_idx is None and any(k in t for k in _OUTLOOK_CONV_KEYS):
+                        conv_idx = j
+                break
+        if code_idx is None or conv_idx is None:
+            log.debug('Outlook: 找不到 CB代碼 或 轉換價 欄位')
+            return _outlook_cb_cache
+        filled = 0
+        for row in rows:
+            if row is header_row:
+                continue
+            cells = row.find_all('td')
+            if len(cells) <= max(code_idx, conv_idx):
+                continue
+            code = cells[code_idx].get_text(strip=True).replace(' ', '')
+            price_str = cells[conv_idx].get_text(strip=True).replace(',', '')
+            if not code or not price_str:
+                continue
+            try:
+                _outlook_cb_cache[code] = float(price_str)
+                filled += 1
+            except (ValueError, TypeError):
+                pass
+        if filled:
+            log.info(f'Outlook cbas 轉換價：{filled} 筆（{latest_mail.Subject}）')
+    except ImportError:
+        log.debug('Outlook: pywin32 未安裝，略過')
+    except Exception as e:
+        log.warning(f'Outlook cbas 讀取失敗: {e}')
+    return _outlook_cb_cache
+
 def get_cb_conversion_price(cb_code: str):
-    """取得 CB 發行時轉換價。先查 TPEX 官方 API，未掛牌者 fallback 至 thefew.tw。"""
+    """取得 CB 發行時轉換價。① TPEX 官方 API → ② Outlook cbas 信件 → ③ thefew.tw。"""
     cb_code = str(cb_code).strip()
     # ① TPEX 官方 API（已掛牌）
     cb_map = _load_tpex_cb_map()
     if cb_code in cb_map:
         return cb_map[cb_code]
-    # ② fallback：爬 thefew.tw（競拍後尚未掛牌的 CB）
+    # ② Outlook cbas「cb案件整理表」（尚未掛牌的競拍 CB）
+    outlook_map = _load_outlook_cb_map()
+    if cb_code in outlook_map:
+        return outlook_map[cb_code]
+    # ③ fallback：爬 thefew.tw
     try:
         r    = requests.get(f'https://thefew.tw/quote/{cb_code}',
                             headers=THEFEW_HEADERS, timeout=20)
@@ -594,7 +677,10 @@ def _calc_rel_perf(closing_date_tw: str, code: str, market: str,
         close_now = float(close_price_str)
     except (ValueError, TypeError):
         return None
-    date_ymd = closing_date_tw.replace('/', '-')          # YYYY-MM-DD
+    try:
+        date_ymd = _parse_date(closing_date_tw).strftime('%Y-%m-%d')
+    except Exception:
+        return None
     before_date = _date_n_trading_days_before(date_ymd, n)
     if not before_date:
         return None
@@ -629,6 +715,35 @@ def enrich_stocks(df: pd.DataFrame) -> pd.DataFrame:
         if (i + 1) % 20 == 0 or (i + 1) == total:
             log.info(f'    股票收盤價+相對大盤: {i+1}/{total}')
     return df
+
+def backfill_stock_rel_perf(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Fill missing stock-vs-TAIEX relative performance once prices are available."""
+    if df.empty:
+        return df, 0
+    df = df.copy()
+    if '投標結束日收盤價' not in df.columns:
+        return df, 0
+    rel_cols = [(5, '相對大盤漲跌_5d'), (10, '相對大盤漲跌_10d'), (20, '相對大盤漲跌_20d')]
+    for _, col in rel_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    filled = 0
+    for idx, row in df.iterrows():
+        close_str = row.get('投標結束日收盤價')
+        if _is_empty(close_str):
+            continue
+        date_tw = row.get('投標結束日')
+        code = row.get('證券代號')
+        market = row.get('發行市場')
+        for n, col in rel_cols:
+            if not _is_empty(row.get(col)):
+                continue
+            val = _calc_rel_perf(date_tw, code, market, close_str, n)
+            if val is not None:
+                df.at[idx, col] = str(val)
+                filled += 1
+    return df, filled
 
 def enrich_cbs(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -770,9 +885,10 @@ def download_history() -> None:
 
 # ── Mode 2: Incremental update ────────────────────────────────────────────────
 
-def update_data() -> None:
-    global _tpex_cb_cache
-    _tpex_cb_cache = None   # 每次更新強制重抓最新轉換價表
+def update_data() -> bool:
+    global _tpex_cb_cache, _outlook_cb_cache
+    _tpex_cb_cache = None    # 每次更新強制重抓最新轉換價表
+    _outlook_cb_cache = None # 每次更新強制重讀 Outlook 最新信件
     log.info('=== 增量更新 ===')
     _load_price_cache()
     _load_hvol_cache()
@@ -865,7 +981,15 @@ def update_data() -> None:
     stocks_exist = backfill_close(stocks_exist, False, cbs_exist, True)
     cbs_exist    = backfill_close(cbs_exist,    True,  stocks_exist, False)
 
-    # ── 4. Backfill missing CB conversion prices (TPEX API, bulk) ─────────
+    # ── 4. Backfill missing stock-vs-TAIEX relative performance ───────────
+    stocks_exist, rel_filled = backfill_stock_rel_perf(stocks_exist)
+    if not new_stocks.empty:
+        new_stocks, rel_new_filled = backfill_stock_rel_perf(new_stocks)
+        rel_filled += rel_new_filled
+    if rel_filled:
+        log.info(f'  補算相對大盤漲跌：{rel_filled} 格')
+
+    # ── 5. Backfill missing CB conversion prices (TPEX API, bulk) ─────────
     def backfill_conv_price(df):
         if df.empty or '發行時轉換價' not in df.columns:
             return df
@@ -873,7 +997,8 @@ def update_data() -> None:
         missing = df[mask]
         if missing.empty:
             return df
-        _load_tpex_cb_map()   # 預先載入快取，後續 get_cb_conversion_price 直接命中
+        _load_tpex_cb_map()    # 預先載入快取，後續 get_cb_conversion_price 直接命中
+        _load_outlook_cb_map() # 同上，Outlook cbas 轉換價
         filled = 0
         for idx, row in missing.iterrows():
             code = str(row['證券代號']).strip()
@@ -889,7 +1014,7 @@ def update_data() -> None:
     if not new_cbs.empty:
         new_cbs = backfill_conv_price(new_cbs)
 
-    # ── 5. Backfill missing CB 歷史波動率30d ──────────────────────────────────
+    # ── 6. Backfill missing CB 歷史波動率30d ──────────────────────────────────
     def backfill_hvol(df):
         if df.empty:
             return df
@@ -924,11 +1049,11 @@ def update_data() -> None:
     cbs_all    = pd.concat([cbs_exist,    new_cbs],    ignore_index=True)
     save_data(stocks_all, cbs_all)
     log.info('=== 增量更新完成 ===')
-    _git_push()
+    return _git_push()
 
 # ── Git auto-push ──────────────────────────────────────────────────────────────
 
-def _git_push() -> None:
+def _git_push() -> bool:
     """Commit changed data/HTML files and push to GitHub Pages."""
     import subprocess
     repo = BASE_DIR
@@ -953,20 +1078,26 @@ def _git_push() -> None:
 
     if not changed:
         log.info('Git: 無異動，略過 push')
-        return
+        return True
 
-    log.info(f'Git: 準備 commit {changed}')
-    subprocess.run(['git', 'add'] + changed, cwd=repo, check=True)
+    try:
+        log.info(f'Git: 準備 commit {changed}')
+        subprocess.run(['git', 'add'] + changed, cwd=repo, check=True)
 
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
-    msg = f'auto update {now_str}'
-    subprocess.run(['git', 'commit', '-m', msg], cwd=repo, check=True)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+        msg = f'auto update {now_str}'
+        subprocess.run(['git', 'commit', '-m', msg], cwd=repo, check=True)
+    except subprocess.CalledProcessError as exc:
+        log.error(f'Git: commit 前置作業失敗，exit={exc.returncode}')
+        return False
 
     result = subprocess.run(['git', 'push'], cwd=repo, capture_output=True, text=True)
     if result.returncode == 0:
         log.info('Git: push 成功')
+        return True
     else:
         log.error(f'Git: push 失敗\n{result.stderr}')
+        return False
 
 # ── HTML Template ─────────────────────────────────────────────────────────────
 
@@ -2076,6 +2207,11 @@ if __name__ == '__main__':
         else:
             generate_html(stocks, cbs)
     elif '--update' in sys.argv:
-        update_data()
+        try:
+            ok = update_data()
+        except Exception:
+            log.exception('增量更新失敗')
+            sys.exit(1)
+        sys.exit(0 if ok else 1)
     else:
         download_history()

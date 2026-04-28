@@ -1,18 +1,24 @@
 @echo off
+setlocal
+
 cd /d "d:\VS Code\Auction"
 
-"C:\Program Files\Python311\python.exe" auction_fetcher.py --update >> auction_fetcher.log 2>&1
+set "PYTHON_EXE=C:\Program Files\Python311\python.exe"
+set "DETAIL_LOG=auction_fetcher.log"
+set "STATUS_LOG=daily_update_status.log"
 
-git add auction_viewer.html auction_stocks.json auction_cbs.json price_cache.json
-git diff --cached --quiet && goto :no_changes
+echo ==== %date% %time% START daily update ====>> "%DETAIL_LOG%"
+echo [%date% %time%] START daily update>> "%STATUS_LOG%"
 
-for /f "tokens=1-3 delims=/ " %%a in ("%date%") do set TODAY=%%a/%%b/%%c
-for /f "tokens=1-2 delims=: " %%a in ("%time%") do set NOW=%%a:%%b
-git commit -m "自動更新資料 %TODAY% %NOW%"
-git push >> auction_fetcher.log 2>&1
-goto :end
+"%PYTHON_EXE%" auction_fetcher.py --update >> "%DETAIL_LOG%" 2>&1
+set "UPDATE_EXIT=%ERRORLEVEL%"
 
-:no_changes
-echo %date% %time% - 無新資料，略過 push >> auction_fetcher.log
+if "%UPDATE_EXIT%"=="0" (
+    echo [%date% %time%] SUCCESS exit=%UPDATE_EXIT%>> "%STATUS_LOG%"
+    echo ==== %date% %time% SUCCESS daily update ====>> "%DETAIL_LOG%"
+    exit /b 0
+)
 
-:end
+echo [%date% %time%] FAILED exit=%UPDATE_EXIT% - see %DETAIL_LOG%>> "%STATUS_LOG%"
+echo ==== %date% %time% FAILED daily update exit=%UPDATE_EXIT% ====>> "%DETAIL_LOG%"
+exit /b %UPDATE_EXIT%
