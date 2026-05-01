@@ -1057,9 +1057,19 @@ def _git_push() -> bool:
     """Commit changed data/HTML files and push to GitHub Pages."""
     import subprocess
     repo = BASE_DIR
+    ssh_key = r'C:\Users\User\.ssh\id_ed25519_auction_viewer'
     targets = ['auction_stocks.json', 'auction_cbs.json',
                'price_cache.json',   'hvol_cache.json', 'taiex_cache.json',
                'auction_viewer.html']
+
+    git_env = os.environ.copy()
+    git_env.setdefault('GIT_TERMINAL_PROMPT', '0')
+    git_env.setdefault('GCM_INTERACTIVE', 'never')
+    if os.path.exists(ssh_key) and not git_env.get('GIT_SSH_COMMAND'):
+        git_env['GIT_SSH_COMMAND'] = (
+            f'ssh -i "{ssh_key.replace(chr(92), "/")}" -o IdentitiesOnly=yes '
+            '-o StrictHostKeyChecking=accept-new'
+        )
 
     def run_git(args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -1067,6 +1077,7 @@ def _git_push() -> bool:
             cwd=repo,
             capture_output=True,
             text=True,
+            env=git_env,
         )
 
     def log_git_failure(label: str, result: subprocess.CompletedProcess) -> None:
@@ -1074,7 +1085,7 @@ def _git_push() -> bool:
         log.error(f'Git: {label} 失敗，exit={result.returncode}\n{output}')
 
     def push_once() -> bool:
-        result = run_git(['push'])
+        result = run_git(['push', 'origin', 'main'])
         if result.returncode == 0:
             log.info('Git: push 成功')
             return True
@@ -1122,11 +1133,11 @@ def _git_push() -> bool:
 
     try:
         log.info(f'Git: 準備 commit {changed}')
-        subprocess.run(['git', 'add'] + changed, cwd=repo, check=True)
+        subprocess.run(['git', 'add'] + changed, cwd=repo, check=True, env=git_env)
 
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
         msg = f'auto update {now_str}'
-        subprocess.run(['git', 'commit', '-m', msg], cwd=repo, check=True)
+        subprocess.run(['git', 'commit', '-m', msg], cwd=repo, check=True, env=git_env)
     except subprocess.CalledProcessError as exc:
         log.error(f'Git: commit 前置作業失敗，exit={exc.returncode}')
         return False
