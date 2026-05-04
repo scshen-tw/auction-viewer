@@ -1099,7 +1099,9 @@ def _git_push() -> bool:
             log_git_failure('fetch origin', fetch)
             return False
 
-        rebase = run_git(['rebase', '--autostash', 'origin/main'])
+        # If another automation touched generated files, keep this run's freshly
+        # generated output while replaying local auto-update commits.
+        rebase = run_git(['rebase', '--autostash', '-X', 'theirs', 'origin/main'])
         if rebase.returncode != 0:
             log_git_failure('rebase origin/main', rebase)
             abort = run_git(['rebase', '--abort'])
